@@ -440,56 +440,49 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
             "Or type *none*.", False
         )
 
+    lang = user.get("language", "en")
+    sw = lang == "sw"
+
     if step == 3:
-        allergies = [] if msg.strip().lower() == "none" else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
+        allergies = [] if msg.strip().lower() in ("none", "hapana") else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
         update_user(user_id, {"allergies": allergies, "onboarding_step": 4})
+        if sw:
+            ack = "Mzio wako umeandikwa! ✅" if allergies else "Sawa, huna mzio! ✅"
+            return (f"{ack}\n\nUnapenda *vyakula au milo gani?* 🥰\n\nMf. _pilau, kuku, pasta, ugali_\nAu andika *ruka*.", False)
         ack = "Noted your allergies! ✅" if allergies else "Great, no allergies! ✅"
-        return (
-            f"{ack}\n\n"
-            "What are some *meals or foods you love?* 🥰\n\n"
-            "e.g. _pilau, chicken, pasta, ugali_\n"
-            "Or type *skip*.", False
-        )
+        return (f"{ack}\n\nWhat are some *meals or foods you love?* 🥰\n\ne.g. _pilau, chicken, pasta, ugali_\nOr type *skip*.", False)
 
     if step == 4:
-        liked = [] if msg.strip().lower() == "skip" else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
+        liked = [] if msg.strip().lower() in ("skip", "ruka") else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
         update_user(user_id, {"liked_meals": liked, "onboarding_step": 5})
-        return (
-            "Yum! Great taste 😄\n\n"
-            "Any *foods or meals you dislike or avoid?*\n\n"
-            "e.g. _fish, liver_\n"
-            "Or type *none*.", False
-        )
+        if sw:
+            return ("Vizuri! 😄\n\nKuna *vyakula unavyoepuka?*\n\nMf. _samaki, ini_\nAu andika *hapana*.", False)
+        return ("Yum! Great taste 😄\n\nAny *foods or meals you dislike or avoid?*\n\ne.g. _fish, liver_\nOr type *none*.", False)
 
     if step == 5:
-        disliked = [] if msg.strip().lower() == "none" else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
+        disliked = [] if msg.strip().lower() in ("none", "hapana") else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
         update_user(user_id, {"disliked_meals": disliked, "onboarding_step": 6})
-        return (
-            "Noted! I'll keep those off your plate 🙅\n\n"
-            "*What's your weekly food budget?*\n\n"
-            "1️⃣ *low* — Under Ksh 1,000\n"
-            "2️⃣ *medium* — Ksh 1,000–3,000\n"
-            "3️⃣ *high* — Ksh 3,000+\n\n"
-            "Reply *low*, *medium*, or *high*.", False
-        )
+        if sw:
+            return ("Sawa! 🙅\n\n*Bajeti yako ya chakula kwa wiki?*\n\n1️⃣ *chini* — Chini ya Ksh 1,000\n2️⃣ *kati* — Ksh 1,000–3,000\n3️⃣ *juu* — Ksh 3,000+\n\nJibu *chini*, *kati*, au *juu*.", False)
+        return ("Noted! 🙅\n\n*What's your weekly food budget?*\n\n1️⃣ *low* — Under Ksh 1,000\n2️⃣ *medium* — Ksh 1,000–3,000\n3️⃣ *high* — Ksh 3,000+\n\nReply *low*, *medium*, or *high*.", False)
 
     if step == 6:
         budget = msg.strip().lower()
+        sw_budgets = {"chini": "low", "kati": "medium", "juu": "high", "1": "low", "2": "medium", "3": "high"}
+        budget = sw_budgets.get(budget, budget)
         if budget not in ("low", "medium", "high"):
+            if sw:
+                return ("Tafadhali jibu *chini*, *kati*, au *juu* 😊", False)
             return ("Please reply with *low*, *medium*, or *high* 😊", False)
         update_user(user_id, {"budget": budget, "onboarding_step": 7})
         cuisine_list = "\n".join([f"{i+1}️⃣ {c}" for i, c in enumerate(CUISINES)])
-        return (
-            "Got it! 💰\n\n"
-            "Would you like to *explore other cuisines* beyond Kenyan food? 🌍\n\n"
-            f"{cuisine_list}\n\n"
-            "Reply with the *numbers* of cuisines you'd like (e.g. _1, 3_)\n"
-            "Or type *no* to stick to Kenyan food only.", False
-        )
+        if sw:
+            return (f"Sawa! 💰\n\nUnataka kujaribu *vyakula vya nchi nyingine?* 🌍\n\n{cuisine_list}\n\nJibu na *nambari* (mf. _1, 3_)\nAu andika *hapana* kwa chakula cha Kenya peke yake.", False)
+        return (f"Got it! 💰\n\nWould you like to *explore other cuisines?* 🌍\n\n{cuisine_list}\n\nReply with *numbers* (e.g. _1, 3_)\nOr type *no* to stick to Kenyan food only.", False)
 
     if step == 7:
         m = msg.strip().lower()
-        if m == "no":
+        if m in ("no", "hapana"):
             update_user(user_id, {"open_to_cuisines": False, "preferred_cuisines": ["Kenyan"], "onboarding_step": 8})
         else:
             selected = []
@@ -505,30 +498,20 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
             if not selected:
                 selected = ["Kenyan"]
             update_user(user_id, {"open_to_cuisines": True, "preferred_cuisines": selected, "onboarding_step": 8})
-        return (
-            "Awesome! 🌍\n\n"
-            "Last one — how do you prefer to cook?\n\n"
-            "1️⃣ *daily* — I cook fresh every day\n"
-            "2️⃣ *meal prep* — I prep meals once a week\n\n"
-            "Reply *daily* or *meal prep*.", False
-        )
+        if sw:
+            return ("Vizuri! 🌍\n\nSwali la mwisho — unapenda kupika vipi?\n\n1️⃣ *kila siku* — Napika kila siku\n2️⃣ *meal prep* — Naandaa chakula mara moja kwa wiki\n\nJibu *kila siku* au *meal prep*.", False)
+        return ("Awesome! 🌍\n\nLast one — how do you prefer to cook?\n\n1️⃣ *daily* — I cook fresh every day\n2️⃣ *meal prep* — I prep meals once a week\n\nReply *daily* or *meal prep*.", False)
 
     if step == 8:
         m = msg.strip().lower()
-        style = "meal_prep" if "meal" in m or "prep" in m or m == "2" else "daily"
-        name = user.get("full_name", "Friend")
+        style = "meal_prep" if any(x in m for x in ["meal", "prep", "2"]) else "daily"
+        name = user.get("full_name", "Rafiki")
         update_user(user_id, {"cooking_style": style, "onboarding_complete": True, "onboarding_step": 9})
-        style_msg = "I'll suggest weekly meal plans for you! 📅" if style == "meal_prep" else "I'll suggest fresh daily recipes! 🍳"
-        return (
-            f"🎉 You're all set, *{name}*!\n\n"
-            f"{style_msg}\n\n"
-            "Now let's stock your pantry! Just tell me what you have at home — "
-            "speak naturally, like you're texting a friend:\n\n"
-            "💬 _\"I have eggs, tomatoes and some rice\"_\n"
-            "💬 _\"Just bought chicken and garlic\"_\n\n"
-            "Or type *cook* if your pantry is already set up!\n"
-            "Type *help* anytime to see all commands.", True
-        )
+        if sw:
+            style_msg = "Nitakupendekeza mpango wa chakula wa wiki! 📅" if style == "meal_prep" else "Nitakupendekeza mapishi mapya kila siku! 🍳"
+            return (f"🎉 Umeweka vizuri, *{name}*!\n\n{style_msg}\n\nSasa niambie una nini nyumbani — sema kawaida:\n\n💬 _\"Nina mayai, nyanya na mchele\"_\n💬 _\"Nimenunua kuku na vitunguu saumu\"_\n\nAu andika *pika* kama pantry yako iko tayari!", True)
+        style_msg = "I'll suggest weekly meal plans! 📅" if style == "meal_prep" else "I'll suggest fresh daily recipes! 🍳"
+        return (f"🎉 You're all set, *{name}*!\n\n{style_msg}\n\nNow let's stock your pantry! Tell me what you have at home:\n\n💬 _\"I have eggs, tomatoes and rice\"_\n💬 _\"Just bought chicken and garlic\"_\n\nOr type *cook* if your pantry is already set up!", True)
 
     return (HELP_MSG, True)
 
