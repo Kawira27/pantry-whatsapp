@@ -1,6 +1,6 @@
-fastapi
-uvicorn
-supabase
-python-dotenv
-twilio
-python-multipart
+flask==3.0.3
+supabase==2.7.2
+python-dotenv==1.0.1
+twilio==9.3.2
+requests==2.31.0
+gunicorn==22.0.0
