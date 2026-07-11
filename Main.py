@@ -429,7 +429,10 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
 
     if step == 2:
         name = msg.strip().title()
+        lang = user.get("language", "en")
         update_user(user_id, {"full_name": name, "onboarding_step": 3})
+        if lang == "sw":
+            return (f"Karibu, *{name}*! 😊\n\nUna *mzio wowote wa chakula?*\n\ne.g. _karanga, maziwa, gluteni, nguruwe_\nAu andika *hapana*.", False)
         return (
             f"Nice to meet you, *{name}*! 😊\n\n"
             "Do you have any *food allergies or dietary restrictions?*\n\n"
