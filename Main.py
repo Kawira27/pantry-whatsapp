@@ -412,14 +412,24 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
     if step == 0:
         update_user(user_id, {"onboarding_step": 1})
         return (
-            "👋 Welcome to *PantryChef*! I help you cook great meals from what you already have.\n\n"
-            "Let's set up your profile — it only takes a minute!\n\n"
-            "*What's your name?*", False
+            "👋 Welcome to *PantryChef*! 🍳\n"
+            "I help you cook great meals from what you already have.\n\n"
+            "First, choose your preferred language:\n\n"
+            "1️⃣  🇬🇧 *English*\n"
+            "2️⃣  🇰🇪 *Kiswahili*\n\n"
+            "Reply *1* or *2*", False
         )
 
     if step == 1:
+        lang = "sw" if msg.strip() in ("2", "kiswahili", "swahili") else "en"
+        update_user(user_id, {"language": lang, "onboarding_step": 2})
+        if lang == "sw":
+            return ("Sawa! 🇰🇪 Tutaendelea kwa Kiswahili.\n\nJina lako ni nani?", False)
+        return ("Great! 🇬🇧 We'll continue in English.\n\nWhat's your name?", False)
+
+    if step == 2:
         name = msg.strip().title()
-        update_user(user_id, {"full_name": name, "onboarding_step": 2})
+        update_user(user_id, {"full_name": name, "onboarding_step": 3})
         return (
             f"Nice to meet you, *{name}*! 😊\n\n"
             "Do you have any *food allergies or dietary restrictions?*\n\n"
