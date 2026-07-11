@@ -63,14 +63,21 @@ REMOVE_SIGNALS = [
 ]
 
 ADD_SIGNALS = [
+    # English - explicit
     "i have", "i also have", "i've got", "i also got", "i got", "i bought",
     "i also bought", "just bought", "just got", "also picked up", "also got",
     "we have", "we also have", "at home", "in my fridge", "in the fridge",
     "in my kitchen", "i picked up", "picked up", "i found", "there's some",
     "got some", "went shopping", "from the shop", "from the market",
+    "i picked", "purchased", "i also picked", "forgot to mention",
+    "also have", "oh and i have", "oh i also",
+    # English - quantity-based (one X, two Y, a packet of)
+    "one ", "two ", "three ", "a packet", "a bag", "a bunch", "a loaf",
+    "a tin", "a can", "a bottle", "a kilo", "half a", "some ",
+    # Swahili
     "nimenunua", "niko na", "nimepata", "niko nazo", "kuna", "nimebuy",
-    "i picked", "purchased", "i also picked", "pia niko na", "pia nimenunua",
-    "forgot to mention", "also have", "oh and i have", "oh i also",
+    "pia niko na", "pia nimenunua", "niko na", "nina ", "tuna ",
+    "niliambia", "nimechukua", "nimepata",
 ]
 
 
@@ -119,17 +126,26 @@ def parse_pantry_intent(message: str, known_ingredients: list[str]) -> dict:
         return local
 
     known_str = ", ".join(known_ingredients[:80])
-    prompt = f"""You are a pantry assistant. A user sent this WhatsApp message:
+    prompt = f"""You are a smart pantry assistant for a Kenyan cooking app. A user sent this WhatsApp message:
 "{message}"
 
 Known ingredients in our database: {known_str}
 
 Decide if the user is:
-1. ADDING ingredients (e.g. "I bought eggs", "I have tomatoes", "just got some chicken")
-2. REMOVING ingredients (e.g. "used up the rice", "ran out of onions", "I don't have milk")
-3. NEITHER
+1. ADDING ingredients - includes ANY of these patterns:
+   - Explicit: "I have", "I bought", "just got", "nimenunua", "niko na"
+   - Listing with quantities: "one egg, two tomatoes, a packet of milk"
+   - Shopping list style: "one kitunguu, one egg, one packet of milk, rice, chicken"
+   - Any message that lists food items they currently possess
+2. REMOVING ingredients: "used up", "ran out", "finished", "imekwisha", "hakuna"
+3. NEITHER: asking for recipes, general chat
 
-Extract only ingredient names that match items in the known list.
+Handle Swahili/Kenyan names and map to English:
+- kitunguu = onions, mayai/yai = eggs, maziwa = milk, nyanya = tomatoes
+- kuku = chicken, nyama = beef, wali/mchele = rice, sukuma = sukuma wiki
+- nduma = arrowroots, muhogo = cassava, ndizi = bananas, karoti = carrots
+
+Extract only ingredients matching the known list. Ignore quantities like "one", "two", "a packet of".
 
 Respond ONLY with valid JSON:
 {{"intent": "add" | "remove" | "none", "ingredients": ["ingredient1", "ingredient2"]}}"""
