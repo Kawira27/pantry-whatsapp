@@ -22,6 +22,9 @@ supabase: Client = create_client(
 )
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
+TWILIO_FROM = os.environ.get("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
 
 CUISINES = [
     "Kenyan", "Indian", "Italian", "Chinese",
@@ -424,9 +427,9 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
             "Or type *none*.", False
         )
 
-    if step == 2:
+    if step == 3:
         allergies = [] if msg.strip().lower() == "none" else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
-        update_user(user_id, {"allergies": allergies, "onboarding_step": 3})
+        update_user(user_id, {"allergies": allergies, "onboarding_step": 4})
         ack = "Noted your allergies! ✅" if allergies else "Great, no allergies! ✅"
         return (
             f"{ack}\n\n"
@@ -435,9 +438,9 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
             "Or type *skip*.", False
         )
 
-    if step == 3:
+    if step == 4:
         liked = [] if msg.strip().lower() == "skip" else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
-        update_user(user_id, {"liked_meals": liked, "onboarding_step": 4})
+        update_user(user_id, {"liked_meals": liked, "onboarding_step": 5})
         return (
             "Yum! Great taste 😄\n\n"
             "Any *foods or meals you dislike or avoid?*\n\n"
@@ -445,9 +448,9 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
             "Or type *none*.", False
         )
 
-    if step == 4:
+    if step == 5:
         disliked = [] if msg.strip().lower() == "none" else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
-        update_user(user_id, {"disliked_meals": disliked, "onboarding_step": 5})
+        update_user(user_id, {"disliked_meals": disliked, "onboarding_step": 6})
         return (
             "Noted! I'll keep those off your plate 🙅\n\n"
             "*What's your weekly food budget?*\n\n"
@@ -457,11 +460,11 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
             "Reply *low*, *medium*, or *high*.", False
         )
 
-    if step == 5:
+    if step == 6:
         budget = msg.strip().lower()
         if budget not in ("low", "medium", "high"):
             return ("Please reply with *low*, *medium*, or *high* 😊", False)
-        update_user(user_id, {"budget": budget, "onboarding_step": 6})
+        update_user(user_id, {"budget": budget, "onboarding_step": 7})
         cuisine_list = "\n".join([f"{i+1}️⃣ {c}" for i, c in enumerate(CUISINES)])
         return (
             "Got it! 💰\n\n"
@@ -471,10 +474,10 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
             "Or type *no* to stick to Kenyan food only.", False
         )
 
-    if step == 6:
+    if step == 7:
         m = msg.strip().lower()
         if m == "no":
-            update_user(user_id, {"open_to_cuisines": False, "preferred_cuisines": ["Kenyan"], "onboarding_step": 7})
+            update_user(user_id, {"open_to_cuisines": False, "preferred_cuisines": ["Kenyan"], "onboarding_step": 8})
         else:
             selected = []
             for part in m.replace(",", " ").split():
@@ -488,7 +491,7 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
                             selected.append(c)
             if not selected:
                 selected = ["Kenyan"]
-            update_user(user_id, {"open_to_cuisines": True, "preferred_cuisines": selected, "onboarding_step": 7})
+            update_user(user_id, {"open_to_cuisines": True, "preferred_cuisines": selected, "onboarding_step": 8})
         return (
             "Awesome! 🌍\n\n"
             "Last one — how do you prefer to cook?\n\n"
@@ -497,11 +500,11 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
             "Reply *daily* or *meal prep*.", False
         )
 
-    if step == 7:
+    if step == 8:
         m = msg.strip().lower()
         style = "meal_prep" if "meal" in m or "prep" in m or m == "2" else "daily"
         name = user.get("full_name", "Friend")
-        update_user(user_id, {"cooking_style": style, "onboarding_complete": True, "onboarding_step": 8})
+        update_user(user_id, {"cooking_style": style, "onboarding_complete": True, "onboarding_step": 9})
         style_msg = "I'll suggest weekly meal plans for you! 📅" if style == "meal_prep" else "I'll suggest fresh daily recipes! 🍳"
         return (
             f"🎉 You're all set, *{name}*!\n\n"
@@ -579,6 +582,40 @@ def route(msg: str, user: dict) -> str:
     user_id = user["id"]
     m = msg.strip().lower()
     name = user.get("full_name", "Friend")
+
+    # NUMBERED MENU SHORTCUTS
+    if m.strip() in ("1", "1️⃣"):
+        m = "cook"
+    elif m.strip() in ("2", "2️⃣"):
+        m = "pantry"
+    elif m.strip() in ("3", "3️⃣"):
+        m = "saved"
+    elif m.strip() in ("4", "4️⃣"):
+        m = "profile"
+    elif m.strip() in ("5", "5️⃣", "exit", "bye", "goodbye"):
+        return f"👋 Goodbye {name}! Come back when you're hungry 😄\nReply *hi* anytime to get started again."
+
+    # COOKING CONFIRMATION
+    if user.get("awaiting_cooking_confirmation"):
+        recipe_name = user.get("last_suggested_recipe_name", "that recipe")
+        recipe_id = user.get("last_suggested_recipe_id")
+        if m in ("yes, i cooked it", "yes i cooked it", "yes", "1", "cooked", "i cooked it"):
+            # Remove recipe ingredients from pantry
+            update_user(user_id, {"awaiting_cooking_confirmation": False})
+            if recipe_id:
+                res = supabase.table("recipe_ingredients").select("ingredients(name)").eq("recipe_id", recipe_id).execute()
+                ing_names = [r["ingredients"]["name"] for r in res.data if r.get("ingredients")]
+                removed, _ = remove_ingredients(user_id, ing_names)
+                lines = [f"✅ Great cook, {name}! Removed from your pantry:"]
+                lines += [f"  • {i}" for i in removed]
+                lines += ["", main_menu(name)]
+                return "\n\n".join(lines)
+        elif m in ("used some", "used some ingredients", "2", "some"):
+            update_user(user_id, {"awaiting_cooking_confirmation": False})
+            return "Which ingredients did you use? Just tell me naturally:\n_'I used the eggs and tomatoes'_"
+        else:
+            update_user(user_id, {"awaiting_cooking_confirmation": False})
+            return f"👍 No problem! Your pantry stays as is.\n\n" + main_menu(name)
 
     # PHOTO CONFIRMATION
     pending = user.get("pending_photo_ingredients")
@@ -702,7 +739,7 @@ def route(msg: str, user: dict) -> str:
             }).execute()
         except Exception:
             pass
-        return format_recipe(recipe)
+        return format_recipe_with_followup(recipe, user_id)
 
     # ── NATURAL LANGUAGE PANTRY DETECTION ──────────────────────────────────────
     # Only call AI if the message has pantry-like signals
@@ -847,6 +884,84 @@ def handle_photo(media_url: str, media_type: str, user: dict) -> str:
         "✏️ Or say what to skip: _yes but skip the milk_",
     ]
     return "\n".join(lines)
+
+# ── Twilio interactive messaging ──────────────────────────────────────────────
+
+def send_buttons(to: str, body_text: str, buttons: list[dict]) -> bool:
+    """
+    Send a WhatsApp interactive button message via Twilio API.
+    buttons = [{"id": "cook", "title": "🍳 Cook"}, ...]
+    Max 3 buttons per message. For more, use send_list() instead.
+    Returns True on success.
+    """
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        log.warning("Twilio credentials not set — cannot send buttons")
+        return False
+
+    # Twilio Content API for interactive messages
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+
+    # Build button payload
+    action_buttons = [
+        {"type": "reply", "reply": {"id": b["id"], "title": b["title"][:20]}}
+        for b in buttons[:3]
+    ]
+
+    payload = {
+        "From": TWILIO_FROM,
+        "To": to,
+        "ContentSid": "",  # not using content templates
+        "Body": body_text,
+        # Interactive buttons via MessagingV2 requires content templates on Twilio
+        # Fall back to plain text with numbered options
+    }
+
+    # NOTE: Twilio WhatsApp sandbox supports interactive messages only via
+    # Content Templates. For sandbox testing we send rich plain text instead.
+    # When moving to production WhatsApp Business, replace with Content API calls.
+    log.info(f"Button send requested to {to}: {[b['title'] for b in buttons]}")
+    return False  # signal to caller to use plain text fallback
+
+
+def send_message(to: str, text: str):
+    """Send a plain text WhatsApp message via Twilio REST API."""
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        return
+    try:
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+        requests.post(
+            url,
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            data={"From": TWILIO_FROM, "To": to, "Body": text},
+            timeout=10,
+        )
+    except Exception as e:
+        log.warning(f"send_message failed: {e}")
+
+
+def main_menu(name: str) -> str:
+    """Return the main menu as rich text with numbered options."""
+    return (
+        f"Hey {name}! 👋 What would you like to do?\n\n"
+        "1️⃣  🍳 *Cook* — Get a recipe suggestion\n"
+        "2️⃣  🧺 *Pantry* — View or update ingredients\n"
+        "3️⃣  ⭐ *Saved* — Your saved recipes\n"
+        "4️⃣  👤 *Profile* — View & edit preferences\n"
+        "5️⃣  👋 *Exit* — Close the menu\n\n"
+        "_Or just tell me what you have: 'I bought tomatoes and eggs'_\n"
+        "_Send a photo of your fridge or receipt 📸_"
+    )
+
+
+def cooking_followup(recipe_name: str) -> str:
+    """Ask user if they cooked or used ingredients after a recipe suggestion."""
+    return (
+        f"Did you end up cooking *{recipe_name}*? 👨‍🍳\n\n"
+        "1️⃣  ✅ *Yes, I cooked it* — remove ingredients from pantry\n"
+        "2️⃣  🥕 *Used some ingredients* — tell me which ones\n"
+        "3️⃣  ❌ *Not yet* — keep pantry as is"
+    )
+
 
 # ── Webhook ────────────────────────────────────────────────────────────────────
 
