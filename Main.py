@@ -486,6 +486,18 @@ def generate_meal_plan(user: dict, pantry_names: list[str]) -> str:
 
 # ── Phase 2: AI Recipe Generation ─────────────────────────────────────────────
 
+def format_recipe_with_followup(recipe: dict, user_id: str) -> str:
+    """Format recipe and ask if they cooked it afterwards."""
+    recipe_text = format_recipe(recipe)
+    update_user(user_id, {
+        "last_suggested_recipe_id": str(recipe["id"]),
+        "last_suggested_recipe_name": recipe["name"],
+        "awaiting_cooking_confirmation": True,
+    })
+    followup = cooking_followup(recipe["name"])
+    return recipe_text + "\n\n" + followup
+
+
 def generate_ai_recipe(pantry_names: list[str], user: dict, meal_type: str = None) -> dict | None:
     """Ask Claude to create a recipe from the user's pantry. Saves to DB."""
     if not ANTHROPIC_API_KEY:
