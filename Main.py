@@ -486,18 +486,6 @@ def generate_meal_plan(user: dict, pantry_names: list[str]) -> str:
 
 # ── Phase 2: AI Recipe Generation ─────────────────────────────────────────────
 
-def format_recipe_with_followup(recipe: dict, user_id: str) -> str:
-    """Format recipe and ask if they cooked it afterwards."""
-    recipe_text = format_recipe(recipe)
-    update_user(user_id, {
-        "last_suggested_recipe_id": str(recipe["id"]),
-        "last_suggested_recipe_name": recipe["name"],
-        "awaiting_cooking_confirmation": True,
-    })
-    followup = cooking_followup(recipe["name"])
-    return recipe_text + "\n\n" + followup
-
-
 def generate_ai_recipe(pantry_names: list[str], user: dict, meal_type: str = None) -> dict | None:
     """Ask Claude to create a recipe from the user's pantry. Saves to DB."""
     if not ANTHROPIC_API_KEY:
@@ -879,8 +867,36 @@ def route(msg: str, user: dict) -> str:
     m = msg.strip().lower()
     name = user.get("full_name", "Friend")
 
-    # NUMBERED MENU SHORTCUTS
-    if m.strip() in ("1", "1️⃣"):
+    # RECIPE SELECTION (after being shown 3 options)
+    pending_options = user.get("pending_recipe_options")
+    if pending_options and m.strip() in ("1", "2", "3"):
+        try:
+            option_ids = json.loads(pending_options)
+            idx = int(m.strip()) - 1
+            if 0 <= idx < len(option_ids):
+                recipe_id = option_ids[idx]
+                res = supabase.table("recipes").select(
+                    "id, name, description, instructions, cuisine, meal_type, "
+                    "prep_time_minutes, cook_time_minutes, servings, difficulty, "
+                    "calories_per_serving, protein_g, carbs_g, fat_g, is_ai_generated, "
+                    "recipe_ingredients(ingredients(name))"
+                ).eq("id", recipe_id).execute()
+                if res.data:
+                    recipe = res.data[0]
+                    update_user(user_id, {"pending_recipe_options": None})
+                    try:
+                        supabase.table("user_recipe_suggestions").insert({
+                            "user_id": user_id, "recipe_id": recipe["id"]
+                        }).execute()
+                    except Exception:
+                        pass
+                    return format_recipe_with_followup(recipe, user_id)
+        except Exception as e:
+            log.warning(f"Recipe selection error: {e}")
+        update_user(user_id, {"pending_recipe_options": None})
+
+    # NUMBERED MENU SHORTCUTS (only when no pending recipe options)
+    if not pending_options and m.strip() in ("1", "1️⃣"):
         m = "cook"
     elif m.strip() in ("2", "2️⃣"):
         m = "pantry"
@@ -891,11 +907,17 @@ def route(msg: str, user: dict) -> str:
     elif m.strip() in ("5", "5️⃣", "exit", "bye", "goodbye"):
         return f"👋 Goodbye {name}! Come back when you're hungry 😄\nReply *hi* anytime to get started again."
 
-    # COOKING CONFIRMATION
-    if user.get("awaiting_cooking_confirmation"):
+    # COOKING CONFIRMATION — only intercept explicit confirmation replies
+    COOK_CONFIRM_TRIGGERS = {"yes, i cooked it", "yes i cooked it", "yes", "1", "cooked", "i cooked it", "ndiyo", "nimepika"}
+    COOK_DENY_TRIGGERS = {"no", "not yet", "3", "hapana", "bado"}
+    COOK_SOME_TRIGGERS = {"used some", "used some ingredients", "2", "some", "baadhi"}
+
+    if user.get("awaiting_cooking_confirmation") and (
+        m in COOK_CONFIRM_TRIGGERS or m in COOK_DENY_TRIGGERS or m in COOK_SOME_TRIGGERS
+    ):
         recipe_name = user.get("last_suggested_recipe_name", "that recipe")
         recipe_id = user.get("last_suggested_recipe_id")
-        if m in ("yes, i cooked it", "yes i cooked it", "yes", "1", "cooked", "i cooked it"):
+        if m in COOK_CONFIRM_TRIGGERS:
             # Remove recipe ingredients from pantry
             update_user(user_id, {"awaiting_cooking_confirmation": False})
             if recipe_id:
@@ -906,7 +928,7 @@ def route(msg: str, user: dict) -> str:
                 lines += [f"  • {i}" for i in removed]
                 lines += ["", main_menu(name)]
                 return "\n\n".join(lines)
-        elif m in ("used some", "used some ingredients", "2", "some"):
+        elif m in COOK_SOME_TRIGGERS:
             update_user(user_id, {"awaiting_cooking_confirmation": False})
             return "Which ingredients did you use? Just tell me naturally:\n_'I used the eggs and tomatoes'_"
         else:
@@ -1025,17 +1047,31 @@ def route(msg: str, user: dict) -> str:
         if not pantry:
             return f"😅 Your pantry is empty! Tell me what you have at home first, {name} 😊"
 
-        # Perfect matches first
+        # Perfect matches
         matches = find_matching_recipes(pantry, user, meal_type=meal_type)
+
         if matches:
-            recipe = random.choice(matches)
-            try:
-                supabase.table("user_recipe_suggestions").insert({
-                    "user_id": user_id, "recipe_id": recipe["id"]
-                }).execute()
-            except Exception:
-                pass
-            return format_recipe_with_followup(recipe, user_id)
+            # Show up to 3 options for user to choose from
+            options = random.sample(matches, min(3, len(matches)))
+            # Store options for follow-up selection
+            option_ids = [str(r["id"]) for r in options]
+            update_user(user_id, {"pending_recipe_options": json.dumps(option_ids)})
+
+            label = f"*{meal_type.title()} Ideas*" if meal_type else "*Recipe Suggestions*"
+            lines = [f"🍳 {label} — pick one:\n"]
+            for i, r in enumerate(options, 1):
+                cuisine = r.get("cuisine", "")
+                mtype = r.get("meal_type", "")
+                tag = f"_{cuisine} • {mtype}_" if cuisine and mtype else ""
+                prep = r.get("prep_time_minutes")
+                cook_t = r.get("cook_time_minutes")
+                timing = f"⏱ {(prep or 0) + (cook_t or 0)}min" if prep or cook_t else ""
+                lines.append(f"{i}️⃣  *{r['name']}* {tag}")
+                if timing:
+                    lines.append(f"    {timing}")
+                lines.append("")
+            lines.append("Reply *1*, *2*, or *3* to see the full recipe!")
+            return "\n".join(lines)
 
         # Near-matches (missing 1-2 ingredients)
         near = find_near_matches(pantry, user, meal_type=meal_type)
