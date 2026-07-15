@@ -286,9 +286,18 @@ def format_pantry_update(intent: str, added_or_removed: list[str], not_found: li
     return "\n".join(lines)
 
 
-def find_matching_recipes(pantry_names: list[str], user: dict, meal_type: str = None) -> list[dict]:
+def find_matching_recipes(pantry_names: list[str], user: dict, meal_type: str = None, max_missing: int = 0) -> list[dict]:
+    """
+    Find recipes matching pantry.
+    max_missing=0: exact matches only
+    max_missing=2: also return near-matches missing up to 2 ingredients
+    Each recipe gets a 'missing' key listing what's needed.
+    """
     query = supabase.table("recipes").select(
-        "id, name, description, instructions, cuisine, meal_type, recipe_ingredients(ingredients(name))"
+        "id, name, description, instructions, cuisine, meal_type, "
+        "prep_time_minutes, cook_time_minutes, servings, difficulty, "
+        "calories_per_serving, protein_g, carbs_g, fat_g, is_ai_generated, "
+        "recipe_ingredients(ingredients(name))"
     )
     if meal_type:
         query = query.eq("meal_type", meal_type)
@@ -308,18 +317,33 @@ def find_matching_recipes(pantry_names: list[str], user: dict, meal_type: str = 
                 required.append(ing["name"].lower())
         if not required:
             continue
-        if not all(i in pantry_names for i in required):
-            continue
+        # Allergy check
         if any(a in required for a in allergies):
             continue
+        # Dislike check
         if any(d in recipe["name"].lower() for d in disliked):
             continue
+        # Cuisine check
         recipe_cuisine = (recipe.get("cuisine") or "").lower()
         if preferred_cuisines and not open_to_cuisines:
             if recipe_cuisine not in preferred_cuisines and recipe_cuisine != "kenyan":
                 continue
-        matches.append(recipe)
+        # Ingredient matching
+        missing = [i for i in required if i not in pantry_names]
+        if len(missing) <= max_missing:
+            recipe["missing"] = missing
+            recipe["match_score"] = len(required) - len(missing)
+            matches.append(recipe)
+
+    # Sort: perfect matches first, then by most ingredients matched
+    matches.sort(key=lambda r: (len(r["missing"]), -r["match_score"]))
     return matches
+
+
+def find_near_matches(pantry_names: list[str], user: dict, meal_type: str = None) -> list[dict]:
+    """Return recipes missing 1-2 ingredients, excluding perfect matches."""
+    all_matches = find_matching_recipes(pantry_names, user, meal_type, max_missing=2)
+    return [r for r in all_matches if len(r.get("missing", [])) > 0]
 
 
 def get_saved_recipes(user_id: str) -> list[str]:
@@ -353,7 +377,7 @@ def log_message(user_id: str, direction: str, body: str):
         log.warning(f"Could not log: {e}")
 
 
-def format_recipe(recipe: dict) -> str:
+def format_recipe(recipe: dict, show_nutrition: bool = True) -> str:
     ingredients = [
         ri["ingredients"]["name"]
         for ri in recipe.get("recipe_ingredients", [])
@@ -361,17 +385,43 @@ def format_recipe(recipe: dict) -> str:
     ]
     cuisine = recipe.get("cuisine", "")
     meal_type = recipe.get("meal_type", "")
-    tag = f"_{cuisine} • {meal_type}_" if cuisine and meal_type else ""
+    is_ai = recipe.get("is_ai_generated", False)
+
+    tag_parts = []
+    if cuisine:
+        tag_parts.append(cuisine)
+    if meal_type:
+        tag_parts.append(meal_type)
+    if is_ai:
+        tag_parts.append("✨ AI recipe")
+    tag = f"_{' • '.join(tag_parts)}_" if tag_parts else ""
+
     lines = [f"🍽️ *{recipe['name']}*"]
     if tag:
         lines.append(tag)
+
+    # Timing & servings
+    timing = []
+    if recipe.get("prep_time_minutes"):
+        timing.append(f"Prep: {recipe['prep_time_minutes']}min")
+    if recipe.get("cook_time_minutes"):
+        timing.append(f"Cook: {recipe['cook_time_minutes']}min")
+    if recipe.get("servings"):
+        timing.append(f"Serves: {recipe['servings']}")
+    if recipe.get("difficulty"):
+        timing.append(f"{recipe['difficulty'].title()}")
+    if timing:
+        lines.append(f"⏱ _{' | '.join(timing)}_")
+
     lines.append("")
     if recipe.get("description"):
         lines += [recipe["description"], ""]
+
     if ingredients:
         lines.append("🛒 *Ingredients:*")
         lines += [f"  • {i}" for i in ingredients]
         lines.append("")
+
     steps = recipe.get("instructions") or ""
     if steps:
         lines.append("👨‍🍳 *Steps:*")
@@ -379,8 +429,38 @@ def format_recipe(recipe: dict) -> str:
         for n, s in enumerate(step_list, 1):
             if str(s).strip():
                 lines.append(f"  {n}. {str(s).strip()}")
-    lines += ["", f"💾 _save {recipe['name']}_ to save this"]
+        lines.append("")
+
+    # Nutrition
+    if show_nutrition and recipe.get("calories_per_serving"):
+        lines.append("📊 *Nutrition (per serving):*")
+        nutrition = []
+        if recipe.get("calories_per_serving"):
+            nutrition.append(f"🔥 {recipe['calories_per_serving']} cal")
+        if recipe.get("protein_g"):
+            nutrition.append(f"💪 {recipe['protein_g']}g protein")
+        if recipe.get("carbs_g"):
+            nutrition.append(f"🌾 {recipe['carbs_g']}g carbs")
+        if recipe.get("fat_g"):
+            nutrition.append(f"🥑 {recipe['fat_g']}g fat")
+        lines.append("  " + "  |  ".join(nutrition))
+        lines.append("")
+
+    lines += [f"💾 _save {recipe['name']}_ to save this"]
     lines += ["🔄 Reply *cook* for another suggestion"]
+    return "\n".join(lines)
+
+
+def format_near_match(recipe: dict) -> str:
+    """Format a near-match recipe showing what's missing."""
+    missing = recipe.get("missing", [])
+    total = recipe.get("match_score", 0) + len(missing)
+    lines = [
+        f"🟡 *{recipe['name']}* _{recipe.get('cuisine', '')} • {recipe.get('meal_type', '')}_",
+        f"You have *{recipe['match_score']}/{total}* ingredients",
+        f"Missing: {', '.join(missing)}",
+        f"Reply *shopping list* to add missing items, or *cook anyway* to see the full recipe."
+    ]
     return "\n".join(lines)
 
 
@@ -403,6 +483,210 @@ def generate_meal_plan(user: dict, pantry_names: list[str]) -> str:
     return "\n".join(lines)
 
 
+
+# ── Phase 2: AI Recipe Generation ─────────────────────────────────────────────
+
+def generate_ai_recipe(pantry_names: list[str], user: dict, meal_type: str = None) -> dict | None:
+    """Ask Claude to create a recipe from the user's pantry. Saves to DB."""
+    if not ANTHROPIC_API_KEY:
+        return None
+
+    lang = user.get("language", "en")
+    allergies = ", ".join(user.get("allergies") or []) or "none"
+    disliked = ", ".join(user.get("disliked_meals") or []) or "none"
+    budget = user.get("budget", "medium")
+    meal_label = meal_type or "any meal"
+    pantry_str = ", ".join(pantry_names)
+
+    prompt = f"""You are a professional Kenyan chef and nutritionist.
+
+Create a delicious {meal_label} recipe using ONLY these available ingredients: {pantry_str}
+
+User preferences:
+- Allergies/restrictions: {allergies}
+- Dislikes: {disliked}
+- Budget: {budget}
+- Language: {"Kiswahili" if lang == "sw" else "English"}
+
+Requirements:
+- Use primarily Kenyan cooking styles and flavours
+- Must be practical and realistic to cook at home
+- Include accurate nutrition estimates
+- Keep instructions clear and simple
+
+Respond ONLY with valid JSON (no markdown):
+{{
+  "name": "Recipe Name",
+  "description": "One sentence description",
+  "instructions": "Step 1.\nStep 2.\nStep 3.",
+  "prep_time_minutes": 10,
+  "cook_time_minutes": 20,
+  "servings": 4,
+  "difficulty": "easy",
+  "meal_type": "{meal_type or "dinner"}",
+  "cuisine": "Kenyan",
+  "calories_per_serving": 350,
+  "protein_g": 25.0,
+  "carbs_g": 40.0,
+  "fat_g": 12.0,
+  "ingredients_used": ["ingredient1", "ingredient2"]
+}}"""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 1000,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=20,
+        )
+        text = resp.json()["content"][0]["text"].strip()
+        text = re.sub(r"```json|```", "", text).strip()
+        data = json.loads(text)
+        log.info(f"🤖 AI generated recipe: {data.get('name')}")
+
+        # Save to DB
+        insert = supabase.table("recipes").insert({
+            "name": data["name"],
+            "description": data.get("description", ""),
+            "instructions": data.get("instructions", ""),
+            "prep_time_minutes": data.get("prep_time_minutes"),
+            "cook_time_minutes": data.get("cook_time_minutes"),
+            "servings": data.get("servings", 4),
+            "difficulty": data.get("difficulty", "easy"),
+            "meal_type": data.get("meal_type", meal_type or "dinner"),
+            "cuisine": data.get("cuisine", "Kenyan"),
+            "calories_per_serving": data.get("calories_per_serving"),
+            "protein_g": data.get("protein_g"),
+            "carbs_g": data.get("carbs_g"),
+            "fat_g": data.get("fat_g"),
+            "is_ai_generated": True,
+            "is_approved": True,
+        }).execute()
+
+        if not insert.data:
+            return None
+
+        recipe = insert.data[0]
+
+        # Link ingredients
+        for ing_name in data.get("ingredients_used", []):
+            ing = find_ingredient_by_name(ing_name)
+            if ing:
+                try:
+                    supabase.table("recipe_ingredients").insert({
+                        "recipe_id": recipe["id"],
+                        "ingredient_id": ing["id"],
+                    }).execute()
+                except Exception:
+                    pass
+
+        # Reload full recipe with ingredients
+        full = supabase.table("recipes").select(
+            "id, name, description, instructions, cuisine, meal_type, "
+            "prep_time_minutes, cook_time_minutes, servings, difficulty, "
+            "calories_per_serving, protein_g, carbs_g, fat_g, is_ai_generated, "
+            "recipe_ingredients(ingredients(name))"
+        ).eq("id", recipe["id"]).execute()
+
+        return full.data[0] if full.data else None
+
+    except Exception as e:
+        log.warning(f"AI recipe generation failed: {e}")
+        return None
+
+
+# ── Phase 2: Shopping List ─────────────────────────────────────────────────────
+
+def get_shopping_list(user_id: str) -> dict | None:
+    """Get user's current active shopping list."""
+    res = supabase.table("shopping_lists").select("*").eq("user_id", user_id).eq("is_complete", False).order("created_at", desc=True).limit(1).execute()
+    return res.data[0] if res.data else None
+
+
+def create_shopping_list(user_id: str, items: list[str], name: str = "Shopping List") -> dict:
+    """Create a new shopping list."""
+    res = supabase.table("shopping_lists").insert({
+        "user_id": user_id,
+        "name": name,
+        "items": json.dumps(items),
+    }).execute()
+    return res.data[0] if res.data else {}
+
+
+def format_shopping_list(items: list[str], name: str = "Shopping List") -> str:
+    lines = [f"🛒 *{name}*", f"_{len(items)} item(s)_", ""]
+    lines += [f"  ☐ {item}" for item in items]
+    lines += ["", "Reply *done shopping* when you're back — I'll add everything to your pantry!"]
+    return "\n".join(lines)
+
+
+def shopping_list_for_recipe(recipe_name: str, user_id: str, pantry_names: list[str]) -> str:
+    """Generate shopping list for a specific recipe."""
+    res = supabase.table("recipes").select(
+        "id, name, recipe_ingredients(ingredients(name))"
+    ).ilike("name", f"%{recipe_name.strip()}%").execute()
+
+    if not res.data:
+        return f"❌ Couldn't find *{recipe_name}*. Try the exact recipe name."
+
+    recipe = res.data[0]
+    all_ingredients = [
+        ri["ingredients"]["name"]
+        for ri in recipe.get("recipe_ingredients", [])
+        if ri.get("ingredients") and ri["ingredients"].get("name")
+    ]
+    need_to_buy = [i for i in all_ingredients if i.lower() not in pantry_names]
+
+    if not need_to_buy:
+        return f"🎉 You already have everything for *{recipe['name']}*!\n\nReply *cook* to get the recipe."
+
+    create_shopping_list(user_id, need_to_buy, f"For {recipe['name']}")
+    return format_shopping_list(need_to_buy, f"For {recipe['name']}")
+
+
+# ── Phase 2: Nutrition Summary ─────────────────────────────────────────────────
+
+def get_nutrition_summary(user_id: str) -> str:
+    """Get nutrition summary from recent suggestions."""
+    res = (
+        supabase.table("user_recipe_suggestions")
+        .select("recipes(name, calories_per_serving, protein_g, carbs_g, fat_g)")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(7)
+        .execute()
+    )
+
+    recipes = [r["recipes"] for r in res.data if r.get("recipes") and r["recipes"].get("calories_per_serving")]
+    if not recipes:
+        return "📊 No nutrition data yet — cook some recipes first and I'll track your stats!"
+
+    total_cal = sum(r["calories_per_serving"] for r in recipes if r.get("calories_per_serving"))
+    total_protein = sum(float(r["protein_g"] or 0) for r in recipes)
+    total_carbs = sum(float(r["carbs_g"] or 0) for r in recipes)
+    total_fat = sum(float(r["fat_g"] or 0) for r in recipes)
+    count = len(recipes)
+
+    lines = [
+        "📊 *Your Nutrition Summary*",
+        f"_Based on your last {count} meals_", "",
+        f"🔥 Avg calories: *{total_cal // count} cal/meal*",
+        f"💪 Total protein: *{total_protein:.0f}g*",
+        f"🌾 Total carbs: *{total_carbs:.0f}g*",
+        f"🥑 Total fat: *{total_fat:.0f}g*", "",
+        "Recent meals:",
+    ]
+    lines += [f"  • {r['name']}" for r in recipes[:5]]
+    return "\n".join(lines)
+
 # ── Onboarding ─────────────────────────────────────────────────────────────────
 
 def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
@@ -412,27 +696,14 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
     if step == 0:
         update_user(user_id, {"onboarding_step": 1})
         return (
-            "👋 Welcome to *PantryChef*! 🍳\n"
-            "I help you cook great meals from what you already have.\n\n"
-            "First, choose your preferred language:\n\n"
-            "1️⃣  🇬🇧 *English*\n"
-            "2️⃣  🇰🇪 *Kiswahili*\n\n"
-            "Reply *1* or *2*", False
+            "👋 Welcome to *PantryChef*! I help you cook great meals from what you already have.\n\n"
+            "Let's set up your profile — it only takes a minute!\n\n"
+            "*What's your name?*", False
         )
 
     if step == 1:
-        lang = "sw" if msg.strip() in ("2", "kiswahili", "swahili") else "en"
-        update_user(user_id, {"language": lang, "onboarding_step": 2})
-        if lang == "sw":
-            return ("Sawa! 🇰🇪 Tutaendelea kwa Kiswahili.\n\nJina lako ni nani?", False)
-        return ("Great! 🇬🇧 We'll continue in English.\n\nWhat's your name?", False)
-
-    if step == 2:
         name = msg.strip().title()
-        lang = user.get("language", "en")
-        update_user(user_id, {"full_name": name, "onboarding_step": 3})
-        if lang == "sw":
-            return (f"Karibu, *{name}*! 😊\n\nUna *mzio wowote wa chakula?*\n\ne.g. _karanga, maziwa, gluteni, nguruwe_\nAu andika *hapana*.", False)
+        update_user(user_id, {"full_name": name, "onboarding_step": 2})
         return (
             f"Nice to meet you, *{name}*! 😊\n\n"
             "Do you have any *food allergies or dietary restrictions?*\n\n"
@@ -440,49 +711,56 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
             "Or type *none*.", False
         )
 
-    lang = user.get("language", "en")
-    sw = lang == "sw"
-
     if step == 3:
-        allergies = [] if msg.strip().lower() in ("none", "hapana") else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
+        allergies = [] if msg.strip().lower() == "none" else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
         update_user(user_id, {"allergies": allergies, "onboarding_step": 4})
-        if sw:
-            ack = "Mzio wako umeandikwa! ✅" if allergies else "Sawa, huna mzio! ✅"
-            return (f"{ack}\n\nUnapenda *vyakula au milo gani?* 🥰\n\nMf. _pilau, kuku, pasta, ugali_\nAu andika *ruka*.", False)
         ack = "Noted your allergies! ✅" if allergies else "Great, no allergies! ✅"
-        return (f"{ack}\n\nWhat are some *meals or foods you love?* 🥰\n\ne.g. _pilau, chicken, pasta, ugali_\nOr type *skip*.", False)
+        return (
+            f"{ack}\n\n"
+            "What are some *meals or foods you love?* 🥰\n\n"
+            "e.g. _pilau, chicken, pasta, ugali_\n"
+            "Or type *skip*.", False
+        )
 
     if step == 4:
-        liked = [] if msg.strip().lower() in ("skip", "ruka") else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
+        liked = [] if msg.strip().lower() == "skip" else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
         update_user(user_id, {"liked_meals": liked, "onboarding_step": 5})
-        if sw:
-            return ("Vizuri! 😄\n\nKuna *vyakula unavyoepuka?*\n\nMf. _samaki, ini_\nAu andika *hapana*.", False)
-        return ("Yum! Great taste 😄\n\nAny *foods or meals you dislike or avoid?*\n\ne.g. _fish, liver_\nOr type *none*.", False)
+        return (
+            "Yum! Great taste 😄\n\n"
+            "Any *foods or meals you dislike or avoid?*\n\n"
+            "e.g. _fish, liver_\n"
+            "Or type *none*.", False
+        )
 
     if step == 5:
-        disliked = [] if msg.strip().lower() in ("none", "hapana") else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
+        disliked = [] if msg.strip().lower() == "none" else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
         update_user(user_id, {"disliked_meals": disliked, "onboarding_step": 6})
-        if sw:
-            return ("Sawa! 🙅\n\n*Bajeti yako ya chakula kwa wiki?*\n\n1️⃣ *chini* — Chini ya Ksh 1,000\n2️⃣ *kati* — Ksh 1,000–3,000\n3️⃣ *juu* — Ksh 3,000+\n\nJibu *chini*, *kati*, au *juu*.", False)
-        return ("Noted! 🙅\n\n*What's your weekly food budget?*\n\n1️⃣ *low* — Under Ksh 1,000\n2️⃣ *medium* — Ksh 1,000–3,000\n3️⃣ *high* — Ksh 3,000+\n\nReply *low*, *medium*, or *high*.", False)
+        return (
+            "Noted! I'll keep those off your plate 🙅\n\n"
+            "*What's your weekly food budget?*\n\n"
+            "1️⃣ *low* — Under Ksh 1,000\n"
+            "2️⃣ *medium* — Ksh 1,000–3,000\n"
+            "3️⃣ *high* — Ksh 3,000+\n\n"
+            "Reply *low*, *medium*, or *high*.", False
+        )
 
     if step == 6:
         budget = msg.strip().lower()
-        sw_budgets = {"chini": "low", "kati": "medium", "juu": "high", "1": "low", "2": "medium", "3": "high"}
-        budget = sw_budgets.get(budget, budget)
         if budget not in ("low", "medium", "high"):
-            if sw:
-                return ("Tafadhali jibu *chini*, *kati*, au *juu* 😊", False)
             return ("Please reply with *low*, *medium*, or *high* 😊", False)
         update_user(user_id, {"budget": budget, "onboarding_step": 7})
         cuisine_list = "\n".join([f"{i+1}️⃣ {c}" for i, c in enumerate(CUISINES)])
-        if sw:
-            return (f"Sawa! 💰\n\nUnataka kujaribu *vyakula vya nchi nyingine?* 🌍\n\n{cuisine_list}\n\nJibu na *nambari* (mf. _1, 3_)\nAu andika *hapana* kwa chakula cha Kenya peke yake.", False)
-        return (f"Got it! 💰\n\nWould you like to *explore other cuisines?* 🌍\n\n{cuisine_list}\n\nReply with *numbers* (e.g. _1, 3_)\nOr type *no* to stick to Kenyan food only.", False)
+        return (
+            "Got it! 💰\n\n"
+            "Would you like to *explore other cuisines* beyond Kenyan food? 🌍\n\n"
+            f"{cuisine_list}\n\n"
+            "Reply with the *numbers* of cuisines you'd like (e.g. _1, 3_)\n"
+            "Or type *no* to stick to Kenyan food only.", False
+        )
 
     if step == 7:
         m = msg.strip().lower()
-        if m in ("no", "hapana"):
+        if m == "no":
             update_user(user_id, {"open_to_cuisines": False, "preferred_cuisines": ["Kenyan"], "onboarding_step": 8})
         else:
             selected = []
@@ -498,20 +776,30 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
             if not selected:
                 selected = ["Kenyan"]
             update_user(user_id, {"open_to_cuisines": True, "preferred_cuisines": selected, "onboarding_step": 8})
-        if sw:
-            return ("Vizuri! 🌍\n\nSwali la mwisho — unapenda kupika vipi?\n\n1️⃣ *kila siku* — Napika kila siku\n2️⃣ *meal prep* — Naandaa chakula mara moja kwa wiki\n\nJibu *kila siku* au *meal prep*.", False)
-        return ("Awesome! 🌍\n\nLast one — how do you prefer to cook?\n\n1️⃣ *daily* — I cook fresh every day\n2️⃣ *meal prep* — I prep meals once a week\n\nReply *daily* or *meal prep*.", False)
+        return (
+            "Awesome! 🌍\n\n"
+            "Last one — how do you prefer to cook?\n\n"
+            "1️⃣ *daily* — I cook fresh every day\n"
+            "2️⃣ *meal prep* — I prep meals once a week\n\n"
+            "Reply *daily* or *meal prep*.", False
+        )
 
     if step == 8:
         m = msg.strip().lower()
-        style = "meal_prep" if any(x in m for x in ["meal", "prep", "2"]) else "daily"
-        name = user.get("full_name", "Rafiki")
+        style = "meal_prep" if "meal" in m or "prep" in m or m == "2" else "daily"
+        name = user.get("full_name", "Friend")
         update_user(user_id, {"cooking_style": style, "onboarding_complete": True, "onboarding_step": 9})
-        if sw:
-            style_msg = "Nitakupendekeza mpango wa chakula wa wiki! 📅" if style == "meal_prep" else "Nitakupendekeza mapishi mapya kila siku! 🍳"
-            return (f"🎉 Umeweka vizuri, *{name}*!\n\n{style_msg}\n\nSasa niambie una nini nyumbani — sema kawaida:\n\n💬 _\"Nina mayai, nyanya na mchele\"_\n💬 _\"Nimenunua kuku na vitunguu saumu\"_\n\nAu andika *pika* kama pantry yako iko tayari!", True)
-        style_msg = "I'll suggest weekly meal plans! 📅" if style == "meal_prep" else "I'll suggest fresh daily recipes! 🍳"
-        return (f"🎉 You're all set, *{name}*!\n\n{style_msg}\n\nNow let's stock your pantry! Tell me what you have at home:\n\n💬 _\"I have eggs, tomatoes and rice\"_\n💬 _\"Just bought chicken and garlic\"_\n\nOr type *cook* if your pantry is already set up!", True)
+        style_msg = "I'll suggest weekly meal plans for you! 📅" if style == "meal_prep" else "I'll suggest fresh daily recipes! 🍳"
+        return (
+            f"🎉 You're all set, *{name}*!\n\n"
+            f"{style_msg}\n\n"
+            "Now let's stock your pantry! Just tell me what you have at home — "
+            "speak naturally, like you're texting a friend:\n\n"
+            "💬 _\"I have eggs, tomatoes and some rice\"_\n"
+            "💬 _\"Just bought chicken and garlic\"_\n\n"
+            "Or type *cook* if your pantry is already set up!\n"
+            "Type *help* anytime to see all commands.", True
+        )
 
     return (HELP_MSG, True)
 
@@ -724,18 +1012,49 @@ def route(msg: str, user: dict) -> str:
         pantry = get_pantry_names(user_id)
         if not pantry:
             return f"😅 Your pantry is empty! Tell me what you have at home first, {name} 😊"
+
+        # Perfect matches first
         matches = find_matching_recipes(pantry, user, meal_type=meal_type)
-        if not matches:
-            label = f"{meal_type} recipe" if meal_type else "recipe"
-            return f"🤔 No {label} matches your pantry right now.\n\nTell me what else you have at home and I'll find something!"
-        recipe = random.choice(matches)
-        try:
-            supabase.table("user_recipe_suggestions").insert({
-                "user_id": user_id, "recipe_id": recipe["id"]
-            }).execute()
-        except Exception:
-            pass
-        return format_recipe_with_followup(recipe, user_id)
+        if matches:
+            recipe = random.choice(matches)
+            try:
+                supabase.table("user_recipe_suggestions").insert({
+                    "user_id": user_id, "recipe_id": recipe["id"]
+                }).execute()
+            except Exception:
+                pass
+            return format_recipe_with_followup(recipe, user_id)
+
+        # Near-matches (missing 1-2 ingredients)
+        near = find_near_matches(pantry, user, meal_type=meal_type)
+        if near:
+            label = meal_type or "recipe"
+            lines = [f"🤔 No perfect {label} match, but these are close:\n"]
+            for r in near[:3]:
+                lines.append(format_near_match(r))
+                lines.append("")
+            lines.append("✨ Or reply *create recipe* and I'll make one just for you!")
+            return "\n".join(lines)
+
+        # AI recipe generation
+        if ANTHROPIC_API_KEY:
+            ai_recipe = generate_ai_recipe(pantry, user, meal_type)
+            if ai_recipe:
+                try:
+                    supabase.table("user_recipe_suggestions").insert({
+                        "user_id": user_id, "recipe_id": ai_recipe["id"]
+                    }).execute()
+                    supabase.table("ai_recipe_log").insert({
+                        "user_id": user_id,
+                        "pantry_snapshot": json.dumps(pantry),
+                        "recipe_id": ai_recipe["id"],
+                    }).execute()
+                except Exception:
+                    pass
+                return "✨ *No existing recipe matched, so I created one just for you!*\n\n" + format_recipe_with_followup(ai_recipe, user_id)
+
+        label = f"{meal_type} recipe" if meal_type else "recipe"
+        return f"🤔 No {label} matches your pantry right now.\n\nTell me what else you have at home and I'll find something!"
 
     # ── NATURAL LANGUAGE PANTRY DETECTION ──────────────────────────────────────
     # Only call AI if the message has pantry-like signals
@@ -752,6 +1071,52 @@ def route(msg: str, user: dict) -> str:
         if intent == "remove" and ingredients:
             removed, not_found = remove_ingredients(user_id, ingredients)
             return format_pantry_update("remove", removed, not_found, name)
+
+    # SHOPPING LIST
+    if "shopping list" in m or m == "shopping":
+        pantry = get_pantry_names(user_id)
+        if "for " in m:
+            recipe_name = m.split("for ", 1)[1].strip()
+            return shopping_list_for_recipe(recipe_name, user_id, pantry)
+        near = find_near_matches(pantry, user)
+        if near:
+            all_missing = []
+            for r in near[:5]:
+                all_missing += r.get("missing", [])
+            unique_missing = list(dict.fromkeys(all_missing))[:10]
+            if unique_missing:
+                create_shopping_list(user_id, unique_missing, "Pantry Top-Up")
+                return format_shopping_list(unique_missing, "Pantry Top-Up")
+        return "🛒 Your pantry already covers most recipes! Reply *cook* to see what you can make."
+
+    # DONE SHOPPING
+    if "done shopping" in m or m in ("done", "back from shopping"):
+        shopping = get_shopping_list(user_id)
+        if not shopping:
+            return "I don't have an active shopping list for you. Reply *shopping list* to create one!"
+        items = json.loads(shopping.get("items", "[]")) if isinstance(shopping.get("items"), str) else shopping.get("items", [])
+        added, not_found = add_ingredients(user_id, items)
+        supabase.table("shopping_lists").update({"is_complete": True}).eq("id", shopping["id"]).execute()
+        lines = ["🎉 Welcome back! Added to your pantry:"]
+        lines += [f"  • {i}" for i in added]
+        if not_found:
+            lines += ["\n❓ Couldn't find:", *[f"  • {i}" for i in not_found]]
+        lines += ["\nReply *cook* to see what you can make now! 🍳"]
+        return "\n".join(lines)
+
+    # CREATE AI RECIPE
+    if any(p in m for p in ["create recipe", "make me a recipe", "generate recipe", "invent a recipe", "tengeneza recipe"]):
+        pantry = get_pantry_names(user_id)
+        if not pantry:
+            return "😅 Your pantry is empty! Add some ingredients first."
+        ai_recipe = generate_ai_recipe(pantry, user, meal_type)
+        if ai_recipe:
+            return "✨ *I created a recipe just for you!*\n\n" + format_recipe_with_followup(ai_recipe, user_id)
+        return "😕 Couldn't generate a recipe right now. Try again in a moment!"
+
+    # NUTRITION
+    if any(p in m for p in ["nutrition", "calories", "macros", "health stats", "lishe"]):
+        return get_nutrition_summary(user_id)
 
     # DEFAULT fallback
     return (
