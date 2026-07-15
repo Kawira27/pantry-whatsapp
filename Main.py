@@ -541,11 +541,11 @@ Respond ONLY with valid JSON (no markdown):
                 "content-type": "application/json",
             },
             json={
-                "model": "claude-sonnet-4-6",
-                "max_tokens": 1000,
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 800,
                 "messages": [{"role": "user", "content": prompt}],
             },
-            timeout=20,
+            timeout=15,
         )
         text = resp.json()["content"][0]["text"].strip()
         text = re.sub(r"```json|```", "", text).strip()
