@@ -885,6 +885,54 @@ def route(msg: str, user: dict) -> str:
     m = msg.strip().lower()
     name = user.get("full_name", "Friend")
 
+    # COOKING CONFIRMATION — must come before recipe selection to intercept 1/2/3
+    if user.get("awaiting_cooking_confirmation"):
+        recipe_name = user.get("last_suggested_recipe_name", "that recipe")
+        recipe_id = user.get("last_suggested_recipe_id")
+        if m in COOK_CONFIRM_TRIGGERS:
+            update_user(user_id, {"awaiting_cooking_confirmation": False})
+            if recipe_id:
+                res = supabase.table("recipe_ingredients").select("ingredients(name)").eq("recipe_id", recipe_id).execute()
+                ing_names = [r["ingredients"]["name"] for r in res.data if r.get("ingredients")]
+                removed, _ = remove_ingredients(user_id, ing_names)
+                update_user(user_id, {
+                    "awaiting_rating_recipe_id": str(recipe_id),
+                    "awaiting_rating_recipe_name": recipe_name,
+                })
+                lines = [f"✅ Great cook, {name}! Removed from your pantry:"]
+                lines += [f"  • {i}" for i in removed]
+                lines += [
+                    "",
+                    f"⭐ How was *{recipe_name}*? Rate it:",
+                    "1️⃣ ⭐ Didn't like it",
+                    "2️⃣ ⭐⭐ It was okay",
+                    "3️⃣ ⭐⭐⭐ Pretty good!",
+                    "4️⃣ ⭐⭐⭐⭐ Really enjoyed it",
+                    "5️⃣ ⭐⭐⭐⭐⭐ Absolutely loved it!",
+                    "",
+                    "_Or reply *skip* to skip the rating_"
+                ]
+                return "\n".join(lines)
+        elif m in COOK_SOME_TRIGGERS:
+            update_user(user_id, {"awaiting_cooking_confirmation": False})
+            return "Which ingredients did you use? Just tell me naturally:\n_'I used the eggs and tomatoes'_"
+        elif m in COOK_DENY_TRIGGERS:
+            update_user(user_id, {"awaiting_cooking_confirmation": False})
+            return f"👍 No problem! Your pantry stays as is.\n\n" + main_menu(name)
+        else:
+            # Unknown reply while awaiting confirmation — re-prompt
+            return (
+                f"Did you end up cooking *{recipe_name}*? 👨‍🍳\n\n"
+                "1️⃣  ✅ *Yes, I cooked it* — remove ingredients from pantry\n"
+                "2️⃣  🥕 *Used some ingredients* — tell me which ones\n"
+                "3️⃣  ❌ *Not yet* — keep pantry as is"
+            )
+
+    # Define confirmation triggers (used by cooking confirmation block above)
+    COOK_CONFIRM_TRIGGERS = {"yes, i cooked it", "yes i cooked it", "yes", "1", "cooked", "i cooked it", "ndiyo", "nimepika"}
+    COOK_DENY_TRIGGERS = {"no", "not yet", "3", "hapana", "bado"}
+    COOK_SOME_TRIGGERS = {"used some", "used some ingredients", "2", "some", "baadhi"}
+
     # RATING HANDLER
     if user.get("awaiting_rating_recipe_id") and (m in ("1","2","3","4","5") or m == "skip"):
         recipe_id = user.get("awaiting_rating_recipe_id")
@@ -969,49 +1017,6 @@ def route(msg: str, user: dict) -> str:
         m = "profile"
     elif m.strip() in ("5", "5️⃣", "exit", "bye", "goodbye"):
         return f"👋 Goodbye {name}! Come back when you're hungry 😄\nReply *hi* anytime to get started again."
-
-    # COOKING CONFIRMATION — only intercept explicit confirmation replies
-    COOK_CONFIRM_TRIGGERS = {"yes, i cooked it", "yes i cooked it", "yes", "1", "cooked", "i cooked it", "ndiyo", "nimepika"}
-    COOK_DENY_TRIGGERS = {"no", "not yet", "3", "hapana", "bado"}
-    COOK_SOME_TRIGGERS = {"used some", "used some ingredients", "2", "some", "baadhi"}
-
-    if user.get("awaiting_cooking_confirmation") and (
-        m in COOK_CONFIRM_TRIGGERS or m in COOK_DENY_TRIGGERS or m in COOK_SOME_TRIGGERS
-    ):
-        recipe_name = user.get("last_suggested_recipe_name", "that recipe")
-        recipe_id = user.get("last_suggested_recipe_id")
-        if m in COOK_CONFIRM_TRIGGERS:
-            # Remove recipe ingredients from pantry
-            update_user(user_id, {"awaiting_cooking_confirmation": False})
-            if recipe_id:
-                res = supabase.table("recipe_ingredients").select("ingredients(name)").eq("recipe_id", recipe_id).execute()
-                ing_names = [r["ingredients"]["name"] for r in res.data if r.get("ingredients")]
-                removed, _ = remove_ingredients(user_id, ing_names)
-                # Ask for rating
-                update_user(user_id, {
-                    "awaiting_rating_recipe_id": str(recipe_id),
-                    "awaiting_rating_recipe_name": recipe_name,
-                })
-                lines = [f"✅ Great cook, {name}! Removed from your pantry:"]
-                lines += [f"  • {i}" for i in removed]
-                lines += [
-                    "",
-                    f"⭐ How was *{recipe_name}*? Rate it:",
-                    "1️⃣ ⭐ Didn't like it",
-                    "2️⃣ ⭐⭐ It was okay",
-                    "3️⃣ ⭐⭐⭐ Pretty good!",
-                    "4️⃣ ⭐⭐⭐⭐ Really enjoyed it",
-                    "5️⃣ ⭐⭐⭐⭐⭐ Absolutely loved it!",
-                    "",
-                    "_Or reply *skip* to skip the rating_"
-                ]
-                return "\n".join(lines)
-        elif m in COOK_SOME_TRIGGERS:
-            update_user(user_id, {"awaiting_cooking_confirmation": False})
-            return "Which ingredients did you use? Just tell me naturally:\n_'I used the eggs and tomatoes'_"
-        else:
-            update_user(user_id, {"awaiting_cooking_confirmation": False})
-            return f"👍 No problem! Your pantry stays as is.\n\n" + main_menu(name)
 
     # PHOTO CONFIRMATION
     pending = user.get("pending_photo_ingredients")
