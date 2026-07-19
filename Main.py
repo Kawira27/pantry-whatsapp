@@ -885,6 +885,11 @@ def route(msg: str, user: dict) -> str:
     m = msg.strip().lower()
     name = user.get("full_name", "Friend")
 
+    # Confirmation trigger sets — defined early so all handlers can use them
+    COOK_CONFIRM_TRIGGERS = {"yes, i cooked it", "yes i cooked it", "yes", "1", "cooked", "i cooked it", "ndiyo", "nimepika"}
+    COOK_DENY_TRIGGERS = {"no", "not yet", "3", "hapana", "bado"}
+    COOK_SOME_TRIGGERS = {"used some", "used some ingredients", "2", "some", "baadhi"}
+
     # COOKING CONFIRMATION — must come before recipe selection to intercept 1/2/3
     if user.get("awaiting_cooking_confirmation"):
         recipe_name = user.get("last_suggested_recipe_name", "that recipe")
@@ -927,11 +932,6 @@ def route(msg: str, user: dict) -> str:
                 "2️⃣  🥕 *Used some ingredients* — tell me which ones\n"
                 "3️⃣  ❌ *Not yet* — keep pantry as is"
             )
-
-    # Define confirmation triggers (used by cooking confirmation block above)
-    COOK_CONFIRM_TRIGGERS = {"yes, i cooked it", "yes i cooked it", "yes", "1", "cooked", "i cooked it", "ndiyo", "nimepika"}
-    COOK_DENY_TRIGGERS = {"no", "not yet", "3", "hapana", "bado"}
-    COOK_SOME_TRIGGERS = {"used some", "used some ingredients", "2", "some", "baadhi"}
 
     # RATING HANDLER
     if user.get("awaiting_rating_recipe_id") and (m in ("1","2","3","4","5") or m == "skip"):
