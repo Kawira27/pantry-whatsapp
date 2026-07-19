@@ -356,16 +356,26 @@ def get_saved_recipes(user_id: str) -> list[str]:
     return [r["recipes"]["name"] for r in res.data if r.get("recipes")]
 
 
-def save_recipe_by_name(user_id: str, recipe_name: str) -> str:
+def save_recipe_by_name(user_id: str, recipe_name: str, user_name: str = "Friend") -> str:
     res = supabase.table("recipes").select("id, name").ilike("name", f"%{recipe_name.strip()}%").execute()
     if not res.data:
-        return f"❌ Couldn't find *{recipe_name}*. Try the exact recipe name."
+        return (
+            f"❌ Couldn't find *{recipe_name}*. Try the exact recipe name.\n\n"
+            "_Tip: Copy the recipe name exactly as shown_"
+        )
     recipe = res.data[0]
     existing = supabase.table("saved_recipes").select("id").eq("user_id", user_id).eq("recipe_id", recipe["id"]).execute()
     if existing.data:
-        return f"⭐ *{recipe['name']}* is already saved!"
+        return f"⭐ *{recipe['name']}* is already in your saved recipes!"
     supabase.table("saved_recipes").insert({"user_id": user_id, "recipe_id": recipe["id"]}).execute()
-    return f"✅ *{recipe['name']}* saved to your favourites!"
+    return (
+        f"💾 *{recipe['name']}* saved to your favourites, {user_name}!\n\n"
+        "Find it anytime by typing *saved*.\n\n"
+        "What would you like to do next?\n"
+        "🍳 *cook* — get another recipe\n"
+        "🛒 *shopping list* — top up your pantry\n"
+        "📅 *meal prep* — plan your week"
+    )
 
 
 def log_message(user_id: str, direction: str, body: str):
@@ -1102,7 +1112,7 @@ def route(msg: str, user: dict) -> str:
     # SAVE RECIPE
     if m.startswith("save "):
         recipe_name = msg[5:].strip()
-        return save_recipe_by_name(user_id, recipe_name) if recipe_name else "Tell me which recipe:\n_save Pilau_"
+        return save_recipe_by_name(user_id, recipe_name, name) if recipe_name else "Tell me which recipe to save:\n_save Pilau_"
 
     # SAVED RECIPES
     if m in ("saved", "favourites", "favorites", "my recipes", "saved recipes"):
@@ -1231,6 +1241,18 @@ def route(msg: str, user: dict) -> str:
         if intent == "remove" and ingredients:
             removed, not_found = remove_ingredients(user_id, ingredients)
             return format_pantry_update("remove", removed, not_found, name)
+
+    # CREATE AI RECIPE
+    if any(p in m for p in ["create recipe", "make me a recipe", "generate recipe", "invent", "tengeneza recipe", "create a recipe"]):
+        pantry = get_pantry_names(user_id)
+        if not pantry:
+            return f"😅 Your pantry is empty! Tell me what you have at home first, {name}."
+        if not ANTHROPIC_API_KEY:
+            return "✨ AI recipe creation isn't available right now. Reply *cook* for existing recipes!"
+        ai_recipe = generate_ai_recipe(pantry, user, meal_type)
+        if ai_recipe:
+            return "✨ *I created a recipe just for you!*\n\n" + format_recipe_with_followup(ai_recipe, user_id)
+        return "😕 Couldn't generate a recipe right now. Try again in a moment!"
 
     # SHOPPING LIST
     if "shopping list" in m or m == "shopping":
