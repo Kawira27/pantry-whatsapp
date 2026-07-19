@@ -464,6 +464,24 @@ def format_near_match(recipe: dict) -> str:
     return "\n".join(lines)
 
 
+def format_recipe_with_followup(recipe: dict, user_id: str, missing: list = None) -> str:
+    """Format recipe with optional missing ingredient warning, then cooking followup."""
+    lines = []
+    if missing:
+        lines.append(f"⚠️ *Your pantry is missing:* {', '.join(missing)}")
+        lines.append("_You can still try the recipe or grab these on your next shop!_")
+        lines.append("")
+    lines.append(format_recipe(recipe))
+    update_user(user_id, {
+        "last_suggested_recipe_id": str(recipe["id"]),
+        "last_suggested_recipe_name": recipe["name"],
+        "awaiting_cooking_confirmation": True,
+    })
+    lines.append("")
+    lines.append(cooking_followup(recipe["name"]))
+    return "\n".join(lines)
+
+
 def generate_meal_plan(user: dict, pantry_names: list[str]) -> str:
     meal_types = ["breakfast", "lunch", "dinner"]
     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -867,9 +885,45 @@ def route(msg: str, user: dict) -> str:
     m = msg.strip().lower()
     name = user.get("full_name", "Friend")
 
-    # RECIPE SELECTION (after being shown 3 options)
+    # RATING HANDLER
+    if user.get("awaiting_rating_recipe_id") and (m in ("1","2","3","4","5") or m == "skip"):
+        recipe_id = user.get("awaiting_rating_recipe_id")
+        recipe_name = user.get("awaiting_rating_recipe_name", "that recipe")
+        update_user(user_id, {"awaiting_rating_recipe_id": None, "awaiting_rating_recipe_name": None})
+        if m != "skip" and m in ("1","2","3","4","5"):
+            rating = int(m)
+            stars = "⭐" * rating
+            try:
+                # Upsert rating
+                supabase.table("recipe_ratings").upsert({
+                    "user_id": user_id,
+                    "recipe_id": recipe_id,
+                    "rating": rating,
+                }).execute()
+                # Update avg_rating on recipe
+                avg_res = supabase.table("recipe_ratings").select("rating").eq("recipe_id", recipe_id).execute()
+                if avg_res.data:
+                    ratings = [r["rating"] for r in avg_res.data]
+                    avg = round(sum(ratings) / len(ratings), 2)
+                    supabase.table("recipes").update({
+                        "avg_rating": avg,
+                        "rating_count": len(ratings)
+                    }).eq("id", recipe_id).execute()
+            except Exception as e:
+                log.warning(f"Rating save failed: {e}")
+            messages = {
+                1: f"Thanks for the feedback! We'll try to suggest better next time 🙏",
+                2: f"Thanks! We'll keep improving the suggestions 👍",
+                3: f"Glad it was decent! {stars}",
+                4: f"Great to hear you enjoyed it! {stars} 🎉",
+                5: f"Amazing! So glad you loved *{recipe_name}*! {stars} 🎉🎉",
+            }
+            return messages.get(rating, "Thanks for rating!") + "\n\n" + main_menu(name)
+        return "No worries! " + main_menu(name)
+
+    # RECIPE SELECTION (after being shown options)
     pending_options = user.get("pending_recipe_options")
-    if pending_options and m.strip() in ("1", "2", "3"):
+    if pending_options and m.strip() in ("1", "2", "3", "4", "5"):
         try:
             option_ids = json.loads(pending_options)
             idx = int(m.strip()) - 1
@@ -879,18 +933,27 @@ def route(msg: str, user: dict) -> str:
                     "id, name, description, instructions, cuisine, meal_type, "
                     "prep_time_minutes, cook_time_minutes, servings, difficulty, "
                     "calories_per_serving, protein_g, carbs_g, fat_g, is_ai_generated, "
+                    "avg_rating, rating_count, "
                     "recipe_ingredients(ingredients(name))"
                 ).eq("id", recipe_id).execute()
                 if res.data:
                     recipe = res.data[0]
                     update_user(user_id, {"pending_recipe_options": None})
+                    # Check what user is missing
+                    pantry = get_pantry_names(user_id)
+                    all_ings = [
+                        ri["ingredients"]["name"]
+                        for ri in recipe.get("recipe_ingredients", [])
+                        if ri.get("ingredients") and ri["ingredients"].get("name")
+                    ]
+                    missing = [i for i in all_ings if i.lower() not in pantry]
                     try:
                         supabase.table("user_recipe_suggestions").insert({
                             "user_id": user_id, "recipe_id": recipe["id"]
                         }).execute()
                     except Exception:
                         pass
-                    return format_recipe_with_followup(recipe, user_id)
+                    return format_recipe_with_followup(recipe, user_id, missing=missing)
         except Exception as e:
             log.warning(f"Recipe selection error: {e}")
         update_user(user_id, {"pending_recipe_options": None})
@@ -924,10 +987,25 @@ def route(msg: str, user: dict) -> str:
                 res = supabase.table("recipe_ingredients").select("ingredients(name)").eq("recipe_id", recipe_id).execute()
                 ing_names = [r["ingredients"]["name"] for r in res.data if r.get("ingredients")]
                 removed, _ = remove_ingredients(user_id, ing_names)
+                # Ask for rating
+                update_user(user_id, {
+                    "awaiting_rating_recipe_id": str(recipe_id),
+                    "awaiting_rating_recipe_name": recipe_name,
+                })
                 lines = [f"✅ Great cook, {name}! Removed from your pantry:"]
                 lines += [f"  • {i}" for i in removed]
-                lines += ["", main_menu(name)]
-                return "\n\n".join(lines)
+                lines += [
+                    "",
+                    f"⭐ How was *{recipe_name}*? Rate it:",
+                    "1️⃣ ⭐ Didn't like it",
+                    "2️⃣ ⭐⭐ It was okay",
+                    "3️⃣ ⭐⭐⭐ Pretty good!",
+                    "4️⃣ ⭐⭐⭐⭐ Really enjoyed it",
+                    "5️⃣ ⭐⭐⭐⭐⭐ Absolutely loved it!",
+                    "",
+                    "_Or reply *skip* to skip the rating_"
+                ]
+                return "\n".join(lines)
         elif m in COOK_SOME_TRIGGERS:
             update_user(user_id, {"awaiting_cooking_confirmation": False})
             return "Which ingredients did you use? Just tell me naturally:\n_'I used the eggs and tomatoes'_"
@@ -1045,46 +1123,73 @@ def route(msg: str, user: dict) -> str:
     if meal_type or any(p in m for p in ["cook", "recipe", "hungry", "what are we", "what's cooking", "whats cooking", "food", "eat"]):
         pantry = get_pantry_names(user_id)
         if not pantry:
-            return f"😅 Your pantry is empty! Tell me what you have at home first, {name} 😊"
+            return (
+                f"Hey {name}! What do you have at home right now? 🥕\n\n"
+                "Just tell me naturally:\n"
+                "_\"I have eggs, rice and some tomatoes\"_"
+            )
 
-        # Perfect matches
+        # Perfect matches — ranked by rating then ingredient count
         matches = find_matching_recipes(pantry, user, meal_type=meal_type)
+        matches.sort(key=lambda r: (-(r.get("avg_rating") or 0), -r.get("match_score", 0)))
 
-        if matches:
-            # Show up to 3 options for user to choose from
-            options = random.sample(matches, min(3, len(matches)))
-            # Store options for follow-up selection
-            option_ids = [str(r["id"]) for r in options]
+        # Near-matches missing 1-2 ingredients
+        near = find_near_matches(pantry, user, meal_type=meal_type)
+        near.sort(key=lambda r: (len(r.get("missing", [])), -(r.get("avg_rating") or 0)))
+
+        # Combine: perfect matches first, then near-matches, max 5 total
+        all_options = []
+        for r in matches:
+            r["is_perfect"] = True
+            all_options.append(r)
+        for r in near:
+            if len(all_options) >= 5:
+                break
+            r["is_perfect"] = False
+            all_options.append(r)
+
+        if all_options:
+            # Pick up to 5, store for selection
+            shown = all_options[:5]
+            option_ids = [str(r["id"]) for r in shown]
             update_user(user_id, {"pending_recipe_options": json.dumps(option_ids)})
 
-            label = f"*{meal_type.title()} Ideas*" if meal_type else "*Recipe Suggestions*"
-            lines = [f"🍳 {label} — pick one:\n"]
-            for i, r in enumerate(options, 1):
+            label = f"*{meal_type.title()} Ideas*" if meal_type else "*What can you make?*"
+            lines = [f"🍳 {label}\n"]
+
+            for i, r in enumerate(shown, 1):
+                is_perfect = r.get("is_perfect", True)
+                status = "🟢" if is_perfect else "🟡"
+                name_str = f"*{r['name']}*"
                 cuisine = r.get("cuisine", "")
                 mtype = r.get("meal_type", "")
                 tag = f"_{cuisine} • {mtype}_" if cuisine and mtype else ""
-                prep = r.get("prep_time_minutes")
-                cook_t = r.get("cook_time_minutes")
-                timing = f"⏱ {(prep or 0) + (cook_t or 0)}min" if prep or cook_t else ""
-                lines.append(f"{i}️⃣  *{r['name']}* {tag}")
-                if timing:
-                    lines.append(f"    {timing}")
+                prep = r.get("prep_time_minutes") or 0
+                cook_t = r.get("cook_time_minutes") or 0
+                total_time = prep + cook_t
+                timing = f"⏱ {total_time}min" if total_time else ""
+                rating = r.get("avg_rating")
+                stars = f"⭐{rating:.1f}" if rating else ""
+                missing = r.get("missing", [])
+                missing_str = f"🟡 missing: {', '.join(missing)}" if missing else ""
+
+                detail_parts = [p for p in [tag, timing, stars] if p]
+                detail = "  ".join(detail_parts)
+
+                lines.append(f"{i}️⃣  {status} {name_str}")
+                if detail:
+                    lines.append(f"    {detail}")
+                if missing_str:
+                    lines.append(f"    {missing_str}")
                 lines.append("")
-            lines.append("Reply *1*, *2*, or *3* to see the full recipe!")
+
+            num = len(shown)
+            lines.append(f"Reply *1*–*{num}* to see the full recipe!")
+            if len(matches) == 0:
+                lines.append("✨ Or *create recipe* for a custom AI one!")
             return "\n".join(lines)
 
-        # Near-matches (missing 1-2 ingredients)
-        near = find_near_matches(pantry, user, meal_type=meal_type)
-        if near:
-            label = meal_type or "recipe"
-            lines = [f"🤔 No perfect {label} match, but these are close:\n"]
-            for r in near[:3]:
-                lines.append(format_near_match(r))
-                lines.append("")
-            lines.append("✨ Or reply *create recipe* and I'll make one just for you!")
-            return "\n".join(lines)
-
-        # AI recipe generation
+        # AI recipe generation as last resort
         if ANTHROPIC_API_KEY:
             ai_recipe = generate_ai_recipe(pantry, user, meal_type)
             if ai_recipe:
@@ -1099,10 +1204,12 @@ def route(msg: str, user: dict) -> str:
                     }).execute()
                 except Exception:
                     pass
-                return "✨ *No existing recipe matched, so I created one just for you!*\n\n" + format_recipe_with_followup(ai_recipe, user_id)
+                return "✨ *I created a recipe just for you!*\n\n" + format_recipe_with_followup(ai_recipe, user_id)
 
-        label = f"{meal_type} recipe" if meal_type else "recipe"
-        return f"🤔 No {label} matches your pantry right now.\n\nTell me what else you have at home and I'll find something!"
+        return (
+            f"🤔 I couldn't find anything matching your pantry right now, {name}.\n\n"
+            "What else do you have at home? Just tell me naturally!"
+        )
 
     # ── NATURAL LANGUAGE PANTRY DETECTION ──────────────────────────────────────
     # Only call AI if the message has pantry-like signals
