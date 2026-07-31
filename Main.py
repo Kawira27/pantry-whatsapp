@@ -1016,16 +1016,32 @@ def route(msg: str, user: dict) -> str:
             log.warning(f"Recipe selection error: {e}")
         update_user(user_id, {"pending_recipe_options": None})
 
-    # NUMBERED MENU SHORTCUTS (only when no pending recipe options)
-    if not pending_options and m.strip() in ("1", "1️⃣"):
+    # MEAL TYPE SELECTION (when user was shown the cook menu)
+    if user.get("awaiting_meal_type"):
+        update_user(user_id, {"awaiting_meal_type": False})
+        meal_type_map = {
+            "1": "breakfast", "1️⃣": "breakfast",
+            "breakfast": "breakfast", "kiamsha kinywa": "breakfast", "morning": "breakfast",
+            "2": "lunch", "2️⃣": "lunch",
+            "lunch": "lunch", "chakula cha mchana": "lunch", "midday": "lunch",
+            "3": "dinner", "3️⃣": "dinner",
+            "dinner": "dinner", "chakula cha jioni": "dinner", "supper": "dinner",
+            "4": "snack", "4️⃣": "snack",
+            "snack": "snack", "vitafunio": "snack",
+        }
+        meal_type = meal_type_map.get(m.lower())
+        # Falls through to recipe suggestion below with meal_type set
+
+    # NUMBERED MENU SHORTCUTS (only when no pending recipe options and not awaiting meal type)
+    if not pending_options and not user.get("awaiting_meal_type") and m.strip() in ("1", "1️⃣"):
         m = "cook"
-    elif m.strip() in ("2", "2️⃣"):
+    elif not pending_options and m.strip() in ("2", "2️⃣") and not user.get("awaiting_meal_type"):
         m = "pantry"
-    elif m.strip() in ("3", "3️⃣"):
+    elif m.strip() in ("3", "3️⃣") and not user.get("awaiting_meal_type"):
         m = "saved"
-    elif m.strip() in ("4", "4️⃣"):
+    elif m.strip() in ("4", "4️⃣") and not user.get("awaiting_meal_type"):
         m = "profile"
-    elif m.strip() in ("5", "5️⃣", "exit", "bye", "goodbye"):
+    elif m.strip() in ("5", "5️⃣", "exit", "bye", "goodbye") and not user.get("awaiting_meal_type"):
         return f"👋 Goodbye {name}! Come back when you're hungry 😄\nReply *hi* anytime to get started again."
 
     # PHOTO CONFIRMATION
@@ -1135,7 +1151,32 @@ def route(msg: str, user: dict) -> str:
     elif "snack" in m:
         meal_type = "snack"
 
-    if meal_type or any(p in m for p in ["cook", "recipe", "hungry", "what are we", "what's cooking", "whats cooking", "food", "eat"]):
+    if any(p in m for p in ["cook", "recipe", "hungry", "what are we", "what's cooking", "whats cooking", "food", "eat"]) and not meal_type:
+        # Ask what meal type before suggesting recipes
+        lang = user.get("language", "en")
+        if lang == "sw":
+            update_user(user_id, {"awaiting_meal_type": True})
+            return (
+                f"Unataka nini, {name}? 🍳\n\n"
+                "1️⃣ 🌅 *Kiamsha kinywa* — Breakfast\n"
+                "2️⃣ ☀️ *Chakula cha mchana* — Lunch\n"
+                "3️⃣ 🌙 *Chakula cha jioni* — Dinner\n"
+                "4️⃣ 🍿 *Vitafunio* — Snack\n"
+                "5️⃣ 🎲 *Chochote* — Surprise me!"
+            )
+        update_user(user_id, {"awaiting_meal_type": True})
+        return (
+            f"What are we cooking, {name}? 🍳\n\n"
+            "1️⃣ 🌅 *Breakfast*\n"
+            "2️⃣ ☀️ *Lunch*\n"
+            "3️⃣ 🌙 *Dinner*\n"
+            "4️⃣ 🍿 *Snack*\n"
+            "5️⃣ 🎲 *Surprise me!*"
+        )
+
+    if meal_type or m in ("5", "surprise me", "surprise", "chochote"):
+        if m in ("5", "surprise me", "surprise", "chochote"):
+            meal_type = None  # any meal type
         pantry = get_pantry_names(user_id)
         if not pantry:
             return (
