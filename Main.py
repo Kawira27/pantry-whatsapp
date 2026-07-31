@@ -933,7 +933,7 @@ def route(msg: str, user: dict) -> str:
             return "Which ingredients did you use? Just tell me naturally:\n_'I used the eggs and tomatoes'_"
         elif m in COOK_DENY_TRIGGERS:
             update_user(user_id, {"awaiting_cooking_confirmation": False})
-            return f"👍 No problem! Your pantry stays as is.\n\n" + main_menu(name)
+            return f"👍 No problem! Your pantry stays as is.\n\n" + main_menu(name, user.get('language', 'en'))
         else:
             # Unknown reply while awaiting confirmation — re-prompt
             return (
@@ -976,8 +976,8 @@ def route(msg: str, user: dict) -> str:
                 4: f"Great to hear you enjoyed it! {stars} 🎉",
                 5: f"Amazing! So glad you loved *{recipe_name}*! {stars} 🎉🎉",
             }
-            return messages.get(rating, "Thanks for rating!") + "\n\n" + main_menu(name)
-        return "No worries! " + main_menu(name)
+            return messages.get(rating, "Thanks for rating!") + "\n\n" + main_menu(name, user.get('language', 'en'))
+        return "No worries! " + main_menu(name, user.get('language', 'en'))
 
     # RECIPE SELECTION (after being shown options)
     pending_options = user.get("pending_recipe_options")
@@ -1019,6 +1019,26 @@ def route(msg: str, user: dict) -> str:
     # MEAL TYPE SELECTION (when user was shown the cook menu)
     if user.get("awaiting_meal_type"):
         update_user(user_id, {"awaiting_meal_type": False})
+        lang = user.get("language", "en")
+
+        # Handle back to menu
+        if m in ("7", "back", "back to menu", "rudi", "menu"):
+            return main_menu(name, lang)
+
+        # Handle saved recipes
+        if m in ("6", "saved recipes", "saved", "mapishi yangu"):
+            saved = get_saved_recipes(user_id)
+            if not saved:
+                return "⭐ No saved recipes yet.\n\nAfter getting a recipe reply:\n_save [recipe name]_"
+            lines = ["⭐ *Your Saved Recipes:*", ""]
+            lines += [f"  {i+1}. {r}" for i, r in enumerate(saved)]
+            lines += ["", "Reply *cook* for a new suggestion!"]
+            return "\n".join(lines)
+
+        # Handle surprise me
+        if m in ("5", "surprise me", "surprise", "chochote"):
+            meal_type = None  # any meal type — falls through below
+
         meal_type_map = {
             "1": "breakfast", "1️⃣": "breakfast",
             "breakfast": "breakfast", "kiamsha kinywa": "breakfast", "morning": "breakfast",
@@ -1029,20 +1049,23 @@ def route(msg: str, user: dict) -> str:
             "4": "snack", "4️⃣": "snack",
             "snack": "snack", "vitafunio": "snack",
         }
-        meal_type = meal_type_map.get(m.lower())
+        if m.lower() in meal_type_map:
+            meal_type = meal_type_map[m.lower()]
         # Falls through to recipe suggestion below with meal_type set
 
-    # NUMBERED MENU SHORTCUTS (only when no pending recipe options and not awaiting meal type)
-    if not pending_options and not user.get("awaiting_meal_type") and m.strip() in ("1", "1️⃣"):
-        m = "cook"
-    elif not pending_options and m.strip() in ("2", "2️⃣") and not user.get("awaiting_meal_type"):
-        m = "pantry"
-    elif m.strip() in ("3", "3️⃣") and not user.get("awaiting_meal_type"):
-        m = "saved"
-    elif m.strip() in ("4", "4️⃣") and not user.get("awaiting_meal_type"):
-        m = "profile"
-    elif m.strip() in ("5", "5️⃣", "exit", "bye", "goodbye") and not user.get("awaiting_meal_type"):
-        return f"👋 Goodbye {name}! Come back when you're hungry 😄\nReply *hi* anytime to get started again."
+    # NUMBERED MENU SHORTCUTS (main menu: Cook/Pantry/Profile/Help/Exit)
+    if not pending_options and not user.get("awaiting_meal_type"):
+        lang = user.get("language", "en")
+        if m.strip() in ("1", "1️⃣"):
+            m = "cook"
+        elif m.strip() in ("2", "2️⃣"):
+            m = "pantry"
+        elif m.strip() in ("3", "3️⃣"):
+            m = "profile"
+        elif m.strip() in ("4", "4️⃣"):
+            return main_menu(name, lang)
+        elif m.strip() in ("5", "5️⃣", "exit", "bye", "goodbye", "toka"):
+            return f"👋 Goodbye {name}! Come back when you're hungry 😄\nReply *hi* anytime to get started again."
 
     # PHOTO CONFIRMATION
     pending = user.get("pending_photo_ingredients")
@@ -1067,9 +1090,10 @@ def route(msg: str, user: dict) -> str:
         added, not_found = add_ingredients(user_id, found)
         return format_pantry_update("add", added, not_found, name)
 
-    # HELP
-    if m in ("help", "menu", "start", "hi", "hello", "hey"):
-        return f"Hey {name}! 👋\n\n" + HELP_MSG
+    # HELP / HI
+    if m in ("help", "menu", "start", "hi", "hello", "hey", "msaada", "habari"):
+        lang = user.get("language", "en")
+        return main_menu(name, lang)
 
     # PROFILE VIEW
     if m in ("profile", "my profile", "settings"):
@@ -1152,26 +1176,29 @@ def route(msg: str, user: dict) -> str:
         meal_type = "snack"
 
     if any(p in m for p in ["cook", "recipe", "hungry", "what are we", "what's cooking", "whats cooking", "food", "eat"]) and not meal_type:
-        # Ask what meal type before suggesting recipes
+        # Show cook submenu
         lang = user.get("language", "en")
+        update_user(user_id, {"awaiting_meal_type": True})
         if lang == "sw":
-            update_user(user_id, {"awaiting_meal_type": True})
             return (
-                f"Unataka nini, {name}? 🍳\n\n"
+                f"Tunapika nini leo, {name}? 🍳\n\n"
                 "1️⃣ 🌅 *Kiamsha kinywa* — Breakfast\n"
                 "2️⃣ ☀️ *Chakula cha mchana* — Lunch\n"
                 "3️⃣ 🌙 *Chakula cha jioni* — Dinner\n"
                 "4️⃣ 🍿 *Vitafunio* — Snack\n"
-                "5️⃣ 🎲 *Chochote* — Surprise me!"
+                "5️⃣ 🎲 *Chochote* — Surprise me!\n"
+                "6️⃣ ⭐ *Mapishi yangu* — Saved recipes\n"
+                "7️⃣ 👋 *Rudi* — Back to menu"
             )
-        update_user(user_id, {"awaiting_meal_type": True})
         return (
-            f"What are we cooking, {name}? 🍳\n\n"
+            f"What are we cooking today, {name}? 🍳\n\n"
             "1️⃣ 🌅 *Breakfast*\n"
             "2️⃣ ☀️ *Lunch*\n"
             "3️⃣ 🌙 *Dinner*\n"
             "4️⃣ 🍿 *Snack*\n"
-            "5️⃣ 🎲 *Surprise me!*"
+            "5️⃣ 🎲 *Surprise me!*\n"
+            "6️⃣ ⭐ *Saved recipes*\n"
+            "7️⃣ 👋 *Back to menu*"
         )
 
     if meal_type or m in ("5", "surprise me", "surprise", "chochote"):
@@ -1523,14 +1550,25 @@ def send_message(to: str, text: str):
         log.warning(f"send_message failed: {e}")
 
 
-def main_menu(name: str) -> str:
+def main_menu(name: str, lang: str = "en") -> str:
     """Return the main menu as rich text with numbered options."""
+    if lang == "sw":
+        return (
+            f"Habari {name}! 👋 Naweza kukusaidia nini?\n\n"
+            "1️⃣  🍳 *Pika* — Pata mapishi\n"
+            "2️⃣  🧺 *Pantry* — Angalia viungo vyako\n"
+            "3️⃣  👤 *Wasifu* — Mapendeleo yako\n"
+            "4️⃣  ❓ *Msaada* — Maagizo yote\n"
+            "5️⃣  👋 *Toka* — Funga menyu\n\n"
+            "_Au niambie una nini nyumbani: 'Nina mayai na nyanya'_\n"
+            "_Piga picha ya friji yako 📸_"
+        )
     return (
-        f"Hey {name}! 👋 What would you like to do?\n\n"
-        "1️⃣  🍳 *Cook* — Get a recipe suggestion\n"
+        f"Hey {name}! 👋 What can I do for you?\n\n"
+        "1️⃣  🍳 *Cook* — Get recipe suggestions\n"
         "2️⃣  🧺 *Pantry* — View or update ingredients\n"
-        "3️⃣  ⭐ *Saved* — Your saved recipes\n"
-        "4️⃣  👤 *Profile* — View & edit preferences\n"
+        "3️⃣  👤 *Profile* — View & edit preferences\n"
+        "4️⃣  ❓ *Help* — See all commands\n"
         "5️⃣  👋 *Exit* — Close the menu\n\n"
         "_Or just tell me what you have: 'I bought tomatoes and eggs'_\n"
         "_Send a photo of your fridge or receipt 📸_"
