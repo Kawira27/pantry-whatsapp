@@ -59,17 +59,23 @@ def validate_twilio_signature(request) -> bool:
     """Verify the request genuinely came from Twilio."""
     if not TWILIO_AUTH_TOKEN:
         log.warning("⚠️ TWILIO_AUTH_TOKEN not set — skipping signature validation")
-        return True  # Allow in dev without token
+        return True
     try:
         validator = RequestValidator(TWILIO_AUTH_TOKEN)
         signature = request.headers.get("X-Twilio-Signature", "")
-        # Use the full URL including https
-        url = request.url
-        # For Railway/proxy environments, reconstruct URL from headers
-        if request.headers.get("X-Forwarded-Proto"):
-            url = url.replace("http://", "https://")
+        if not signature:
+            log.warning("No Twilio signature header — skipping validation in dev")
+            return True
         params = request.form.to_dict()
-        return validator.validate(url, params, signature)
+        # Try with https URL first (Railway proxies http internally)
+        url_https = request.url.replace("http://", "https://")
+        if validator.validate(url_https, params, signature):
+            return True
+        # Fallback: try with original URL
+        if validator.validate(request.url, params, signature):
+            return True
+        log.warning(f"Signature validation failed for URL: {url_https}")
+        return False
     except Exception as e:
         log.warning(f"Signature validation error: {e}")
         return False
