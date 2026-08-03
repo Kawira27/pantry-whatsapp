@@ -815,18 +815,107 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
     if step == 8:
         m = msg.strip().lower()
         style = "meal_prep" if "meal" in m or "prep" in m or m == "2" else "daily"
+        update_user(user_id, {"cooking_style": style, "onboarding_step": 9})
+        if sw:
+            return ("Vizuri! 🍳\n\nUna watu wangapi nyumbani wanaokula pamoja?\n\ne.g. _1, 2, 4_\nAu andika *ruka*.", False)
+        return ("Got it! 🍳\n\nHow many people do you cook for at home?\n\ne.g. _1, 2, 4_\nOr type *skip*.", False)
+
+    if step == 9:
+        m = msg.strip().lower()
+        household_size = None
+        if m not in ("skip", "ruka"):
+            try:
+                household_size = int(m.split()[0])
+            except Exception:
+                pass
+        update_user(user_id, {"household_size": household_size, "onboarding_step": 10})
+        if sw:
+            return ("Sawa! 👨‍👩‍👧\n\nUnaishi wapi? (Mji au kaunti)\n\nMf. _Nairobi, Mombasa, Kisumu_\nAu andika *ruka*.", False)
+        return ("Got it! 👨‍👩‍👧\n\nWhich city or region are you in?\n\ne.g. _Nairobi, Mombasa, Kisumu, London_\nOr type *skip*.", False)
+
+    if step == 10:
+        m = msg.strip()
+        region = None if m.lower() in ("skip", "ruka") else m.title()
+        update_user(user_id, {"region": region, "onboarding_step": 11})
+        if sw:
+            return ("📍 Sawa!\n\nUna ujuzi gani wa kupika?\n\n1️⃣ *Mwanzo* — Ninajifunza\n2️⃣ *Kati* — Najua mambo ya msingi\n3️⃣ *Uzoefu* — Napika vizuri\n\nJibu *1*, *2* au *3*.", False)
+        return ("📍 Got it!\n\nHow would you rate your cooking skills?\n\n1️⃣ *Beginner* — Still learning\n2️⃣ *Intermediate* — Know the basics\n3️⃣ *Advanced* — Confident cook\n\nReply *1*, *2* or *3*.", False)
+
+    if step == 11:
+        m = msg.strip().lower()
+        skill_map = {"1": "beginner", "beginner": "beginner", "mwanzo": "beginner",
+                     "2": "intermediate", "intermediate": "intermediate", "kati": "intermediate",
+                     "3": "advanced", "advanced": "advanced", "uzoefu": "advanced"}
+        skill = skill_map.get(m, "intermediate")
+        update_user(user_id, {"cooking_skill": skill, "onboarding_step": 12})
+        if sw:
+            return ("👨‍🍳 Vizuri!\n\nUnapenda chakula chenye kiwango gani cha utiaji?\n\n1️⃣ *Kidogo* — Sipendi pilipili\n2️⃣ *Wastani* — Kidogo kidogo\n3️⃣ *Ukali* — Napenda moto\n4️⃣ *Ukali sana* — Kadri iwezekanavyo!\n\nJibu *1*–*4*.", False)
+        return ("👨‍🍳 Great!\n\nHow much spice do you like in your food?\n\n1️⃣ *Mild* — No heat please\n2️⃣ *Medium* — A little warmth\n3️⃣ *Hot* — I like it spicy\n4️⃣ *Very hot* — The hotter the better!\n\nReply *1*–*4*.", False)
+
+    if step == 12:
+        m = msg.strip().lower()
+        spice_map = {"1": "mild", "mild": "mild", "kidogo": "mild",
+                     "2": "medium", "medium": "medium", "wastani": "medium",
+                     "3": "hot", "hot": "hot", "ukali": "hot",
+                     "4": "very hot", "very hot": "very hot", "ukali sana": "very hot"}
+        spice = spice_map.get(m, "medium")
+        update_user(user_id, {"spice_tolerance": spice, "onboarding_step": 13})
+        if sw:
+            return ("🌶️ Sawa!\n\nUna malengo gani ya kiafya? (Chagua moja au zaidi)\n\n1️⃣ Kupunguza uzito\n2️⃣ Kuongeza misuli\n3️⃣ Chakula bora na uwiano\n4️⃣ Udhibiti wa ugonjwa (kisukari, shinikizo la damu n.k)\n5️⃣ Hakuna — Napenda tu kula vizuri\n\nJibu kwa nambari e.g. _1, 3_ au *ruka*.", False)
+        return ("🌶️ Perfect!\n\nDo you have any health goals? (Choose one or more)\n\n1️⃣ Weight loss\n2️⃣ Muscle gain\n3️⃣ Balanced / healthy eating\n4️⃣ Managing a condition (diabetes, hypertension etc.)\n5️⃣ None — I just want to eat well\n\nReply with numbers e.g. _1, 3_ or *skip*.", False)
+
+    if step == 13:
+        m = msg.strip().lower()
+        goal_map = {
+            "1": "weight_loss", "2": "muscle_gain", "3": "balanced",
+            "4": "medical", "5": "none",
+            "weight loss": "weight_loss", "muscle gain": "muscle_gain",
+            "balanced": "balanced", "medical": "medical", "none": "none",
+            "kupunguza uzito": "weight_loss", "kuongeza misuli": "muscle_gain",
+            "chakula bora": "balanced", "ugonjwa": "medical", "hakuna": "none",
+        }
+        health_goals = []
+        if m not in ("skip", "ruka", "5", "none", "hakuna"):
+            for part in m.replace(",", " ").split():
+                g = goal_map.get(part.strip())
+                if g and g != "none":
+                    health_goals.append(g)
+        update_user(user_id, {"health_goals": health_goals or [], "onboarding_step": 14})
+        if sw:
+            return ("💪 Vizuri!\n\nSwali la mwisho kabisa — na ni la hiari:\n\nMshahara wako huja lini kwa kawaida? Hii inakusaidia kupata mapendekezo ya chakula cha bei nafuu mwishoni mwa mwezi.\n\ne.g. _25_ au _1_\nAu andika *ruka* — sawa kabisa!", False)
+        return ("💪 Almost done!\n\nOne last question — completely optional:\n\nWhat day of the month does your salary usually arrive? This helps me suggest budget-friendly meals when funds are low.\n\ne.g. _25_ or _1_\nOr type *skip* — totally fine!", False)
+
+    if step == 14:
+        m = msg.strip().lower()
+        payday = None
+        if m not in ("skip", "ruka"):
+            try:
+                payday = int(m.split()[0])
+                if not 1 <= payday <= 31:
+                    payday = None
+            except Exception:
+                pass
         name = user.get("full_name", "Friend")
-        update_user(user_id, {"cooking_style": style, "onboarding_complete": True, "onboarding_step": 9})
+        style = user.get("cooking_style", "daily")
+        update_user(user_id, {"payday": payday, "onboarding_complete": True, "onboarding_step": 15})
         style_msg = "I'll suggest weekly meal plans for you! 📅" if style == "meal_prep" else "I'll suggest fresh daily recipes! 🍳"
+        if sw:
+            return (
+                f"🎉 Umeweka vizuri kabisa, *{name}*!\\n\\n"
+                f"{style_msg}\\n\\n"
+                "Sasa niambie una nini nyumbani — sema kawaida:\\n\\n"
+                "💬 _\\\"Nina mayai, nyanya na mchele\\\"_\\n"
+                "💬 _\\\"Nimenunua kuku na vitunguu saumu\\\"_\\n\\n"
+                "Au andika *pika* kama pantry yako iko tayari!", True
+            )
         return (
-            f"🎉 You're all set, *{name}*!\n\n"
-            f"{style_msg}\n\n"
-            "Now let's stock your pantry! Just tell me what you have at home — "
-            "speak naturally, like you're texting a friend:\n\n"
-            "💬 _\"I have eggs, tomatoes and some rice\"_\n"
-            "💬 _\"Just bought chicken and garlic\"_\n\n"
-            "Or type *cook* if your pantry is already set up!\n"
-            "Type *help* anytime to see all commands.", True
+            f"🎉 You're all set, *{name}*!\\n\\n"
+            f"{style_msg}\\n\\n"
+            "Now let's stock your pantry! Just tell me what you have at home:\\n\\n"
+            "💬 _\\\"I have eggs, tomatoes and some rice\\\"_\\n"
+            "💬 _\\\"Just bought chicken and garlic\\\"_\\n\\n"
+            "Or type *cook* if your pantry is already set up!\\n"
+            "Type *help* anytime to see the menu.", True
         )
 
     return (HELP_MSG, True)
