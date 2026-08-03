@@ -1054,18 +1054,97 @@ def route(msg: str, user: dict) -> str:
         # Falls through to recipe suggestion below with meal_type set
 
     # NUMBERED MENU SHORTCUTS (main menu: Cook/Pantry/Profile/Help/Exit)
-    if not pending_options and not user.get("awaiting_meal_type"):
-        lang = user.get("language", "en")
+    lang = user.get("language", "en")
+    if not pending_options and not user.get("awaiting_meal_type") and not user.get("awaiting_pantry_action") and not user.get("awaiting_profile_action"):
         if m.strip() in ("1", "1️⃣"):
             m = "cook"
         elif m.strip() in ("2", "2️⃣"):
-            m = "pantry"
+            update_user(user_id, {"awaiting_pantry_action": True})
+            return pantry_menu(name, lang)
         elif m.strip() in ("3", "3️⃣"):
-            m = "profile"
-        elif m.strip() in ("4", "4️⃣"):
+            update_user(user_id, {"awaiting_profile_action": True})
+            return profile_menu(name, lang)
+        elif m.strip() in ("4", "4️⃣", "help", "msaada"):
             return main_menu(name, lang)
         elif m.strip() in ("5", "5️⃣", "exit", "bye", "goodbye", "toka"):
             return f"👋 Goodbye {name}! Come back when you're hungry 😄\nReply *hi* anytime to get started again."
+
+    # PANTRY SUBMENU HANDLER
+    if user.get("awaiting_pantry_action"):
+        update_user(user_id, {"awaiting_pantry_action": False})
+        if m in ("1", "view", "angalia"):
+            pantry = get_user_pantry(user_id)
+            if not pantry:
+                return f"🗑️ Your pantry is empty, {name}!\n\nJust tell me what you have:\n_\"I have eggs, tomatoes and rice\"_"
+            names = sorted([i["name"] for i in pantry])
+            lines = [f"🧺 *Your Pantry* ({len(names)} items)", ""]
+            lines += [f"  • {n}" for n in names]
+            lines += ["", "➕ _add [ingredient]_ to add more", "➖ _remove [ingredient]_ to remove"]
+            return "\n".join(lines)
+        elif m in ("2", "add", "ongeza"):
+            return f"What did you get, {name}? Just tell me naturally:\n\n_\"I bought chicken and tomatoes\"_\n_\"Nimenunua mayai na unga\"_\n\nOr send a 📸 photo of your fridge or receipt!"
+        elif m in ("3", "remove", "ondoa"):
+            return f"What would you like to remove from your pantry?\n\n_\"I used up the rice\"_\n_\"Nimemaliza sukuma wiki\"_"
+        elif m in ("4", "shopping list", "shopping", "orodha"):
+            pantry = get_pantry_names(user_id)
+            near = find_near_matches(pantry, user)
+            if near:
+                all_missing = []
+                for r in near[:5]:
+                    all_missing += r.get("missing", [])
+                unique_missing = list(dict.fromkeys(all_missing))[:10]
+                if unique_missing:
+                    create_shopping_list(user_id, unique_missing, "Pantry Top-Up")
+                    return format_shopping_list(unique_missing, "Pantry Top-Up")
+            return "🛒 Your pantry already covers most recipes! Reply *cook* to see what you can make."
+        elif m in ("5", "photo", "picha"):
+            return f"📸 Send me a photo of your fridge or shopping receipt and I'll add the ingredients automatically!"
+        elif m in ("6", "back", "rudi"):
+            return main_menu(name, lang)
+        else:
+            update_user(user_id, {"awaiting_pantry_action": True})
+            return pantry_menu(name, lang)
+
+    # PROFILE SUBMENU HANDLER
+    if user.get("awaiting_profile_action"):
+        update_user(user_id, {"awaiting_profile_action": False})
+        if m in ("1", "view profile", "view", "angalia wasifu", "angalia"):
+            allergies = ", ".join(user.get("allergies") or []) or "None"
+            liked = ", ".join(user.get("liked_meals") or []) or "Not specified"
+            disliked = ", ".join(user.get("disliked_meals") or []) or "None"
+            budget = (user.get("budget") or "Not set").title()
+            cuisines = ", ".join(user.get("preferred_cuisines") or []) or "Kenyan"
+            style = (user.get("cooking_style") or "daily").replace("_", " ").title()
+            return (
+                f"👤 *Your Profile*\n\n"
+                f"🙋 Name: {name}\n"
+                f"🚫 Allergies: {allergies}\n"
+                f"❤️ Loves: {liked}\n"
+                f"👎 Avoids: {disliked}\n"
+                f"💰 Budget: {budget}\n"
+                f"🌍 Cuisines: {cuisines}\n"
+                f"🍳 Cooking style: {style}\n\n"
+                "Reply *2* to edit any of these."
+            )
+        elif m in ("2", "edit", "hariri", "edit profile", "update"):
+            update_user(user_id, {"onboarding_complete": False, "onboarding_step": 0})
+            reply, _ = handle_onboarding({**user, "onboarding_complete": False, "onboarding_step": 0}, m)
+            return reply
+        elif m in ("3", "nutrition", "lishe", "macros", "calories"):
+            return get_nutrition_summary(user_id)
+        elif m in ("4", "saved recipes", "saved", "mapishi yangu", "favourites"):
+            saved = get_saved_recipes(user_id)
+            if not saved:
+                return "⭐ No saved recipes yet.\n\nAfter getting a recipe reply:\n_save [recipe name]_"
+            lines = ["⭐ *Your Saved Recipes:*", ""]
+            lines += [f"  {i+1}. {r}" for i, r in enumerate(saved)]
+            lines += ["", "Reply *cook* for a new suggestion!"]
+            return "\n".join(lines)
+        elif m in ("5", "back", "rudi"):
+            return main_menu(name, lang)
+        else:
+            update_user(user_id, {"awaiting_profile_action": True})
+            return profile_menu(name, lang)
 
     # PHOTO CONFIRMATION
     pending = user.get("pending_photo_ingredients")
@@ -1121,8 +1200,18 @@ def route(msg: str, user: dict) -> str:
         reply, _ = handle_onboarding({**user, "onboarding_step": 0}, msg)
         return reply
 
-    # PANTRY VIEW
-    if m in ("pantry", "ingredients", "my pantry", "my ingredients"):
+    # PANTRY COMMAND — show submenu
+    if m in ("pantry", "ingredients", "my pantry", "my ingredients", "🧺"):
+        update_user(user_id, {"awaiting_pantry_action": True})
+        return pantry_menu(name, lang)
+
+    # PROFILE COMMAND — show submenu
+    if m in ("profile", "my profile", "settings", "wasifu", "👤"):
+        update_user(user_id, {"awaiting_profile_action": True})
+        return profile_menu(name, lang)
+
+    # PANTRY VIEW (direct)
+    if m in ("view pantry", "angalia pantry"):
         pantry = get_user_pantry(user_id)
         if not pantry:
             return (
@@ -1572,6 +1661,52 @@ def main_menu(name: str, lang: str = "en") -> str:
         "5️⃣  👋 *Exit* — Close the menu\n\n"
         "_Or just tell me what you have: 'I bought tomatoes and eggs'_\n"
         "_Send a photo of your fridge or receipt 📸_"
+    )
+
+
+def pantry_menu(name: str, lang: str = "en") -> str:
+    """Pantry submenu."""
+    if lang == "sw":
+        return (
+            f"🧺 *Pantry yako*, {name}\n\n"
+            "1️⃣  👀 *Angalia* — Viungo vilivyopo\n"
+            "2️⃣  ➕ *Ongeza* — Ongeza viungo\n"
+            "3️⃣  ➖ *Ondoa* — Ondoa kiungo\n"
+            "4️⃣  🛒 *Orodha ya manunuzi* — Shopping list\n"
+            "5️⃣  📸 *Picha* — Piga picha ya friji/risiti\n"
+            "6️⃣  👋 *Rudi* — Rudi kwenye menyu\n\n"
+            "_Au niambie moja kwa moja: 'Nina nyanya na vitunguu'_"
+        )
+    return (
+        f"🧺 *Your Pantry*, {name}\n\n"
+        "1️⃣  👀 *View* — See what you have\n"
+        "2️⃣  ➕ *Add* — Add ingredients\n"
+        "3️⃣  ➖ *Remove* — Remove an ingredient\n"
+        "4️⃣  🛒 *Shopping list* — What to buy\n"
+        "5️⃣  📸 *Photo* — Scan fridge or receipt\n"
+        "6️⃣  👋 *Back* — Back to main menu\n\n"
+        "_Or just tell me naturally: 'I bought chicken and tomatoes'_"
+    )
+
+
+def profile_menu(name: str, lang: str = "en") -> str:
+    """Profile submenu."""
+    if lang == "sw":
+        return (
+            f"👤 *Wasifu wako*, {name}\n\n"
+            "1️⃣  👀 *Angalia wasifu* — Mapendeleo yako\n"
+            "2️⃣  ✏️ *Hariri* — Badilisha mapendeleo\n"
+            "3️⃣  📊 *Lishe* — Muhtasari wa lishe\n"
+            "4️⃣  ⭐ *Mapishi yangu* — Mapishi yaliyohifadhiwa\n"
+            "5️⃣  👋 *Rudi* — Rudi kwenye menyu"
+        )
+    return (
+        f"👤 *Your Profile*, {name}\n\n"
+        "1️⃣  👀 *View profile* — Your preferences\n"
+        "2️⃣  ✏️ *Edit* — Update preferences\n"
+        "3️⃣  📊 *Nutrition* — Your nutrition summary\n"
+        "4️⃣  ⭐ *Saved recipes* — Your favourites\n"
+        "5️⃣  👋 *Back* — Back to main menu"
     )
 
 
