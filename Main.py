@@ -3,11 +3,18 @@ import re
 import json
 import random
 import logging
+import time
+import hashlib
+import hmac
+import base64
 import requests
-from flask import Flask, request
+from flask import Flask, request, abort
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.request_validator import RequestValidator
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from collections import defaultdict
+from threading import Lock
 
 load_dotenv()
 
@@ -25,6 +32,57 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
 TWILIO_FROM = os.environ.get("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
+
+# ── Security ───────────────────────────────────────────────────────────────────
+
+# Rate limiter: track message timestamps per user in memory
+_rate_store: dict = defaultdict(list)
+_rate_lock = Lock()
+RATE_LIMIT_MAX = 10        # max messages
+RATE_LIMIT_WINDOW = 60     # per 60 seconds
+
+def is_rate_limited(phone: str) -> bool:
+    """Return True if user has exceeded rate limit."""
+    now = time.time()
+    with _rate_lock:
+        timestamps = _rate_store[phone]
+        # Remove timestamps outside the window
+        timestamps = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
+        _rate_store[phone] = timestamps
+        if len(timestamps) >= RATE_LIMIT_MAX:
+            return True
+        timestamps.append(now)
+        return False
+
+
+def validate_twilio_signature(request) -> bool:
+    """Verify the request genuinely came from Twilio."""
+    if not TWILIO_AUTH_TOKEN:
+        log.warning("⚠️ TWILIO_AUTH_TOKEN not set — skipping signature validation")
+        return True  # Allow in dev without token
+    try:
+        validator = RequestValidator(TWILIO_AUTH_TOKEN)
+        signature = request.headers.get("X-Twilio-Signature", "")
+        # Use the full URL including https
+        url = request.url
+        # For Railway/proxy environments, reconstruct URL from headers
+        if request.headers.get("X-Forwarded-Proto"):
+            url = url.replace("http://", "https://")
+        params = request.form.to_dict()
+        return validator.validate(url, params, signature)
+    except Exception as e:
+        log.warning(f"Signature validation error: {e}")
+        return False
+
+
+def sanitise_input(text: str) -> str:
+    """Strip potentially dangerous characters from user input."""
+    if not text:
+        return ""
+    # Remove null bytes and control characters (except newlines/tabs)
+    text = re.sub(r"[--]", "", text)
+    # Limit length to prevent abuse
+    return text[:1000].strip()
 
 CUISINES = [
     "Kenyan", "Indian", "Italian", "Chinese",
@@ -720,57 +778,56 @@ def get_nutrition_summary(user_id: str) -> str:
 def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
     step = user.get("onboarding_step", 0)
     user_id = user["id"]
+    sw = user.get("language", "en") == "sw"
 
     if step == 0:
         update_user(user_id, {"onboarding_step": 1})
         return (
-            "👋 Welcome to *PantryChef*! I help you cook great meals from what you already have.\n\n"
-            "Let's set up your profile — it only takes a minute!\n\n"
-            "*What's your name?*", False
+            "👋 Welcome to *PantryChef*! 🍳\n"
+            "I help you cook great meals from what you already have.\n\n"
+            "First, choose your preferred language:\n\n"
+            "1️⃣  🇬🇧 *English*\n"
+            "2️⃣  🇰🇪 *Kiswahili*\n\n"
+            "Reply *1* or *2*", False
         )
 
     if step == 1:
+        lang = "sw" if msg.strip() in ("2", "kiswahili", "swahili") else "en"
+        update_user(user_id, {"language": lang, "onboarding_step": 2})
+        if lang == "sw":
+            return ("Sawa! 🇰🇪 Tutaendelea kwa Kiswahili.\n\nJina lako ni nani?", False)
+        return ("Great! 🇬🇧 We'll continue in English.\n\nWhat's your name?", False)
+
+    if step == 2:
         name = msg.strip().title()
-        update_user(user_id, {"full_name": name, "onboarding_step": 2})
-        return (
-            f"Nice to meet you, *{name}*! 😊\n\n"
-            "Do you have any *food allergies or dietary restrictions?*\n\n"
-            "e.g. _nuts, dairy, gluten, pork_\n"
-            "Or type *none*.", False
-        )
+        lang = user.get("language", "en")
+        sw = lang == "sw"
+        update_user(user_id, {"full_name": name, "onboarding_step": 3})
+        if sw:
+            return (f"Karibu, *{name}*! 😊\n\nUna *mzio wowote wa chakula?*\n\nMf. _karanga, maziwa, gluteni, nguruwe_\nAu andika *hapana*.", False)
+        return (f"Nice to meet you, *{name}*! 😊\n\nDo you have any *food allergies or dietary restrictions?*\n\ne.g. _nuts, dairy, gluten, pork_\nOr type *none*.", False)
 
     if step == 3:
-        allergies = [] if msg.strip().lower() == "none" else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
+        allergies = [] if msg.strip().lower() in ("none", "hapana") else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
         update_user(user_id, {"allergies": allergies, "onboarding_step": 4})
-        ack = "Noted your allergies! ✅" if allergies else "Great, no allergies! ✅"
-        return (
-            f"{ack}\n\n"
-            "What are some *meals or foods you love?* 🥰\n\n"
-            "e.g. _pilau, chicken, pasta, ugali_\n"
-            "Or type *skip*.", False
-        )
+        ack = ("Mzio wako umeandikwa! ✅" if allergies else "Sawa, huna mzio! ✅") if sw else ("Noted your allergies! ✅" if allergies else "Great, no allergies! ✅")
+        if sw:
+            return (f"{ack}\n\nUnapenda *vyakula au milo gani?* 🥰\n\nMf. _pilau, kuku, pasta, ugali_\nAu andika *ruka*.", False)
+        return (f"{ack}\n\nWhat are some *meals or foods you love?* 🥰\n\ne.g. _pilau, chicken, pasta, ugali_\nOr type *skip*.", False)
 
     if step == 4:
-        liked = [] if msg.strip().lower() == "skip" else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
+        liked = [] if msg.strip().lower() in ("skip", "ruka") else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
         update_user(user_id, {"liked_meals": liked, "onboarding_step": 5})
-        return (
-            "Yum! Great taste 😄\n\n"
-            "Any *foods or meals you dislike or avoid?*\n\n"
-            "e.g. _fish, liver_\n"
-            "Or type *none*.", False
-        )
+        if sw:
+            return ("Vizuri! 😄\n\nKuna *vyakula unavyoepuka?*\n\nMf. _samaki, ini_\nAu andika *hapana*.", False)
+        return ("Yum! Great taste 😄\n\nAny *foods or meals you dislike or avoid?*\n\ne.g. _fish, liver_\nOr type *none*.", False)
 
     if step == 5:
-        disliked = [] if msg.strip().lower() == "none" else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
+        disliked = [] if msg.strip().lower() in ("none", "hapana") else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
         update_user(user_id, {"disliked_meals": disliked, "onboarding_step": 6})
-        return (
-            "Noted! I'll keep those off your plate 🙅\n\n"
-            "*What's your weekly food budget?*\n\n"
-            "1️⃣ *low* — Under Ksh 1,000\n"
-            "2️⃣ *medium* — Ksh 1,000–3,000\n"
-            "3️⃣ *high* — Ksh 3,000+\n\n"
-            "Reply *low*, *medium*, or *high*.", False
-        )
+        if sw:
+            return ("Sawa! 🙅\n\n*Bajeti yako ya chakula kwa wiki?*\n\n1️⃣ *chini* — Chini ya Ksh 1,000\n2️⃣ *kati* — Ksh 1,000–3,000\n3️⃣ *juu* — Ksh 3,000+\n\nJibu *chini*, *kati*, au *juu*.", False)
+        return ("Noted! 🙅\n\n*What's your weekly food budget?*\n\n1️⃣ *low* — Under Ksh 1,000\n2️⃣ *medium* — Ksh 1,000–3,000\n3️⃣ *high* — Ksh 3,000+\n\nReply *low*, *medium*, or *high*.", False)
 
     if step == 6:
         budget = msg.strip().lower()
@@ -1488,6 +1545,43 @@ def route(msg: str, user: dict) -> str:
             removed, not_found = remove_ingredients(user_id, ingredients)
             return format_pantry_update("remove", removed, not_found, name)
 
+    # PRIVACY & DATA COMMANDS
+    if m in ("my data", "privacy", "delete my account", "delete account", "futa akaunti", "data yangu"):
+        allergies = ", ".join(user.get("allergies") or []) or "None"
+        return (
+            f"🔒 *Your Data & Privacy*\n\n"
+            f"Here's what PantryChef stores about you:\n\n"
+            f"• Name: {name}\n"
+            f"• WhatsApp number (your identifier)\n"
+            f"• Dietary preferences & allergies: {allergies}\n"
+            f"• Pantry ingredients\n"
+            f"• Message history\n"
+            f"• Recipe ratings and saved recipes\n\n"
+            "We never sell your data or share it with third parties.\n\n"
+            "To delete all your data reply *confirm delete account*.\n"
+            "This is permanent and cannot be undone."
+        )
+
+    if m in ("confirm delete account", "thibitisha kufuta"):
+        try:
+            # Delete all user data
+            supabase.table("user_pantry_items").delete().eq("user_id", user_id).execute()
+            supabase.table("saved_recipes").delete().eq("user_id", user_id).execute()
+            supabase.table("recipe_ratings").delete().eq("user_id", user_id).execute()
+            supabase.table("message_logs").delete().eq("user_id", user_id).execute()
+            supabase.table("shopping_lists").delete().eq("user_id", user_id).execute()
+            supabase.table("user_recipe_suggestions").delete().eq("user_id", user_id).execute()
+            supabase.table("users").delete().eq("id", user_id).execute()
+            log.info(f"🗑️ Account deleted for {from_number}")
+            return (
+                "✅ Your account and all associated data has been permanently deleted.\n\n"
+                "We're sorry to see you go. If you ever want to come back, "
+                "just send us a message and we'll start fresh. 👋"
+            )
+        except Exception as e:
+            log.error(f"Delete account failed: {e}")
+            return "❌ Something went wrong deleting your account. Please try again or contact support."
+
     # CREATE AI RECIPE
     if any(p in m for p in ["create recipe", "make me a recipe", "generate recipe", "invent", "tengeneza recipe", "create a recipe"]):
         pantry = get_pantry_names(user_id)
@@ -1813,9 +1907,15 @@ def cooking_followup(recipe_name: str) -> str:
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
-    body = request.values.get("Body", "").strip()
+    # ── Security checks ────────────────────────────────────────────────────────
+    # 1. Validate Twilio signature
+    if not validate_twilio_signature(request):
+        log.warning("🚨 Invalid Twilio signature — request rejected")
+        abort(403)
+
+    body = sanitise_input(request.values.get("Body", ""))
     from_number = request.values.get("From", "").strip()
-    profile_name = request.values.get("ProfileName", "").strip()
+    profile_name = sanitise_input(request.values.get("ProfileName", ""))
     media_url = request.values.get("MediaUrl0", "").strip()
     media_type = request.values.get("MediaContentType0", "").strip()
     num_media = int(request.values.get("NumMedia", "0"))
@@ -1826,6 +1926,12 @@ def whatsapp():
     msg_obj = response.message()
 
     if not from_number:
+        return str(response)
+
+    # 2. Rate limiting
+    if is_rate_limited(from_number):
+        log.warning(f"🚨 Rate limit exceeded for {from_number}")
+        msg_obj.body("⏳ You're sending messages too fast. Please wait a moment and try again.")
         return str(response)
 
     user = get_or_create_user(from_number, profile_name)
