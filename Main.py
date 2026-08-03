@@ -972,20 +972,20 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
         style_msg = "I'll suggest weekly meal plans for you! 📅" if style == "meal_prep" else "I'll suggest fresh daily recipes! 🍳"
         if sw:
             return (
-                f"🎉 Umeweka vizuri kabisa, *{name}*!\\n\\n"
-                f"{style_msg}\\n\\n"
-                "Sasa niambie una nini nyumbani — sema kawaida:\\n\\n"
-                "💬 _\\\"Nina mayai, nyanya na mchele\\\"_\\n"
-                "💬 _\\\"Nimenunua kuku na vitunguu saumu\\\"_\\n\\n"
+                f"🎉 Umeweka vizuri kabisa, *{name}*!\n\n"
+                f"{style_msg}\n\n"
+                "Sasa niambie una nini nyumbani — sema kawaida:\n\n"
+                "💬 _\"Nina mayai, nyanya na mchele\"_\n"
+                "💬 _\"Nimenunua kuku na vitunguu saumu\"_\n\n"
                 "Au andika *pika* kama pantry yako iko tayari!", True
             )
         return (
-            f"🎉 You're all set, *{name}*!\\n\\n"
-            f"{style_msg}\\n\\n"
-            "Now let's stock your pantry! Just tell me what you have at home:\\n\\n"
-            "💬 _\\\"I have eggs, tomatoes and some rice\\\"_\\n"
-            "💬 _\\\"Just bought chicken and garlic\\\"_\\n\\n"
-            "Or type *cook* if your pantry is already set up!\\n"
+            f"🎉 You're all set, *{name}*!\n\n"
+            f"{style_msg}\n\n"
+            "Now let's stock your pantry! Just tell me what you have at home:\n\n"
+            "💬 _\"I have eggs, tomatoes and some rice\"_\n"
+            "💬 _\"Just bought chicken and garlic\"_\n\n"
+            "Or type *cook* if your pantry is already set up!\n"
             "Type *help* anytime to see the menu.", True
         )
 
