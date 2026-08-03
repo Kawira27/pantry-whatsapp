@@ -1193,7 +1193,8 @@ def route(msg: str, user: dict) -> str:
         update_user(user_id, {"pending_recipe_options": None})
 
     # MEAL TYPE SELECTION (when user was shown the cook menu)
-    if user.get("awaiting_meal_type"):
+    awaiting_meal = user.get("awaiting_meal_type", False)
+    if awaiting_meal:
         update_user(user_id, {"awaiting_meal_type": False})
         lang = user.get("language", "en")
 
@@ -1229,9 +1230,9 @@ def route(msg: str, user: dict) -> str:
             meal_type = meal_type_map[m.lower()]
         # Falls through to recipe suggestion below with meal_type set
 
-    # NUMBERED MENU SHORTCUTS (main menu: Cook/Pantry/Profile/Help/Exit)
+    # NUMBERED MENU SHORTCUTS (only when NOT in cook/pantry/profile submenu)
     lang = user.get("language", "en")
-    if not pending_options and not user.get("awaiting_meal_type") and not user.get("awaiting_pantry_action") and not user.get("awaiting_profile_action"):
+    if not pending_options and not awaiting_meal and not user.get("awaiting_pantry_action") and not user.get("awaiting_profile_action"):
         if m.strip() in ("1", "1️⃣"):
             m = "cook"
         elif m.strip() in ("2", "2️⃣"):
