@@ -1070,6 +1070,7 @@ def route(msg: str, user: dict) -> str:
     user_id = user["id"]
     m = msg.strip().lower()
     name = user.get("full_name", "Friend")
+    meal_type = None  # Initialize here — set by meal type handler or direct text commands
 
     # Confirmation trigger sets — defined early so all handlers can use them
     COOK_CONFIRM_TRIGGERS = {"yes, i cooked it", "yes i cooked it", "yes", "1", "cooked", "i cooked it", "ndiyo", "nimepika"}
@@ -1430,16 +1431,17 @@ def route(msg: str, user: dict) -> str:
         lines += ["", "Reply *cook* for a new suggestion!"]
         return "\n".join(lines)
 
-    # RECIPE / MEAL TYPE REQUESTS
-    meal_type = None
-    if any(w in m for w in ["breakfast", "morning", "brunch"]):
-        meal_type = "breakfast"
-    elif any(w in m for w in ["lunch", "midday", "afternoon"]):
-        meal_type = "lunch"
-    elif any(w in m for w in ["dinner", "supper", "evening"]):
-        meal_type = "dinner"
-    elif "snack" in m:
-        meal_type = "snack"
+    # RECIPE / MEAL TYPE REQUESTS (from direct text like "breakfast", "dinner" etc)
+    # Note: meal_type may already be set by the meal type selection handler above
+    if meal_type is None:
+        if any(w in m for w in ["breakfast", "morning", "brunch"]):
+            meal_type = "breakfast"
+        elif any(w in m for w in ["lunch", "midday", "afternoon"]):
+            meal_type = "lunch"
+        elif any(w in m for w in ["dinner", "supper", "evening"]):
+            meal_type = "dinner"
+        elif "snack" in m:
+            meal_type = "snack"
 
     if any(p in m.split() for p in ["cook", "recipe", "hungry", "food", "eat"]) or \
        any(p in m for p in ["what are we", "what's cooking", "whats cooking"]) and not meal_type:
