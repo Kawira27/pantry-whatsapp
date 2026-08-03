@@ -1007,7 +1007,7 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
 
 # Keywords that are clearly NOT pantry-related (avoid false NLU calls)
 RECIPE_KEYWORDS = ["cook", "recipe", "hungry", "what are we", "breakfast", "lunch",
-                   "dinner", "meal prep", "weekly plan", "food", "eat", "supper",
+                   "dinner", "meal prep", "weekly plan", "supper",
                    "morning", "evening", "brunch", "snack"]
 EXPLICIT_COMMANDS = ["help", "menu", "start", "hi", "hello", "hey", "pantry",
                      "ingredients", "saved", "favourites", "favorites", "profile",
@@ -1440,7 +1440,8 @@ def route(msg: str, user: dict) -> str:
     elif "snack" in m:
         meal_type = "snack"
 
-    if any(p in m for p in ["cook", "recipe", "hungry", "what are we", "what's cooking", "whats cooking", "food", "eat"]) and not meal_type:
+    if any(p in m.split() for p in ["cook", "recipe", "hungry", "food", "eat"]) or \
+       any(p in m for p in ["what are we", "what's cooking", "whats cooking"]) and not meal_type:
         # Show cook submenu
         lang = user.get("language", "en")
         update_user(user_id, {"awaiting_meal_type": True})
