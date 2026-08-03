@@ -969,25 +969,35 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
                 pass
         name = user.get("full_name", "Friend")
         style = user.get("cooking_style", "daily")
-        update_user(user_id, {"payday": payday, "onboarding_complete": True, "onboarding_step": 15})
+        update_user(user_id, {
+            "payday": payday,
+            "onboarding_complete": True,
+            "onboarding_step": 15,
+            "awaiting_meal_type": False,
+            "awaiting_pantry_action": False,
+            "awaiting_profile_action": False,
+            "awaiting_cooking_confirmation": False,
+            "pending_recipe_options": None,
+        })
         style_msg = "I'll suggest weekly meal plans for you! 📅" if style == "meal_prep" else "I'll suggest fresh daily recipes! 🍳"
         if sw:
             return (
                 f"🎉 Umeweka vizuri kabisa, *{name}*!\n\n"
                 f"{style_msg}\n\n"
-                "Sasa niambie una nini nyumbani — sema kawaida:\n\n"
-                "💬 _\"Nina mayai, nyanya na mchele\"_\n"
-                "💬 _\"Nimenunua kuku na vitunguu saumu\"_\n\n"
-                "Au andika *pika* kama pantry yako iko tayari!", True
+                "Hatua ya mwisho — niambie una nini nyumbani sasa hivi:\n\n"
+                "💬 _\"Nina mayai, nyanya, mchele na kuku\"_\n"
+                "💬 _\"Nimenunua unga, vitunguu na nyama\"_\n\n"
+                "📸 Au piga picha ya friji au risiti yako!\n\n"
+                "_Andika *ruka* kama unataka kufanya hivi baadaye_", True
             )
         return (
             f"🎉 You're all set, *{name}*!\n\n"
             f"{style_msg}\n\n"
-            "Now let's stock your pantry! Just tell me what you have at home:\n\n"
-            "💬 _\"I have eggs, tomatoes and some rice\"_\n"
-            "💬 _\"Just bought chicken and garlic\"_\n\n"
-            "Or type *cook* if your pantry is already set up!\n"
-            "Type *help* anytime to see the menu.", True
+            "One last step — tell me what you have at home right now:\n\n"
+            "💬 _\"I have eggs, tomatoes, rice and chicken\"_\n"
+            "💬 _\"I bought flour, onions and minced beef\"_\n\n"
+            "📸 Or send a photo of your fridge or receipt!\n\n"
+            "_Type *skip* to do this later_", True
         )
 
     return (HELP_MSG, True)
@@ -1022,14 +1032,14 @@ def looks_like_pantry_message(msg: str) -> bool:
     return any(signal in m for signal in pantry_signals)
 
 
-def format_pantry_update(action: str, items: list[str], not_found: list[str], name: str) -> str:
+def format_pantry_update(action: str, items: list[str], not_found: list[str], name: str, show_menu: bool = False, lang: str = "en") -> str:
     """Format a friendly pantry update confirmation."""
     lines = []
     if action == "add":
         real_adds = [i for i in items if "(already" not in i]
         already = [i for i in items if "(already" in i]
         if real_adds:
-            lines.append("✅ Added to your pantry:")
+            lines.append(f"✅ Added to your pantry ({len(real_adds)} items):")
             lines += [f"  • {i}" for i in real_adds]
         if already:
             lines.append("\n📌 Already in your pantry:")
@@ -1042,12 +1052,17 @@ def format_pantry_update(action: str, items: list[str], not_found: list[str], na
     if not_found:
         lines.append("\n❓ Didn't recognise:")
         lines += [f"  • {i}" for i in not_found]
-        lines.append("  _(These might not be in our ingredient list yet)_")
+        lines.append("  _(Try different spelling or add them via pantry menu)_")
 
     if not lines:
         return f"🤔 Hmm, I couldn't find those ingredients, {name}. Try being more specific!"
 
-    lines += ["", "🍳 Reply *cook* when you're ready for a recipe!"]
+    if show_menu:
+        # After first pantry stock — show main menu
+        lines += ["", f"Your pantry is ready! Here's what you can do next, {name}:"]
+        lines += ["", main_menu(name, lang)]
+    else:
+        lines += ["", "🍳 Reply *cook* when you're ready for a recipe!"]
     return "\n".join(lines)
 
 
@@ -1545,16 +1560,36 @@ def route(msg: str, user: dict) -> str:
         )
 
     # ── NATURAL LANGUAGE PANTRY DETECTION ──────────────────────────────────────
-    # Only call AI if the message has pantry-like signals
-    if looks_like_pantry_message(m):
+    # Long comma-separated messages OR pantry signal words = pantry message
+    is_pantry_msg = looks_like_pantry_message(m) or (
+        "," in msg and len(msg.split(",")) > 3 and
+        not any(k in m for k in RECIPE_KEYWORDS + EXPLICIT_COMMANDS)
+    )
+
+    # Handle skip during initial pantry setup
+    if m in ("skip", "ruka", "later", "baadaye"):
+        lang = user.get("language", "en")
+        return main_menu(name, lang)
+
+    if is_pantry_msg:
+        # Pantry messages always take priority — clear any pending menu state
+        if user.get("awaiting_meal_type") or user.get("awaiting_pantry_action"):
+            update_user(user_id, {
+                "awaiting_meal_type": False,
+                "awaiting_pantry_action": False,
+            })
         all_ingredients = get_all_ingredient_names()
         result = parse_pantry_intent(msg, all_ingredients)
         intent = result.get("intent", "none")
         ingredients = result.get("ingredients", [])
+        lang = user.get("language", "en")
 
         if intent == "add" and ingredients:
             added, not_found = add_ingredients(user_id, ingredients)
-            return format_pantry_update("add", added, not_found, name)
+            # Check if this is the first pantry add (show main menu after)
+            pantry_count = len(get_user_pantry(user_id))
+            show_menu = pantry_count <= len(added)  # first time adding
+            return format_pantry_update("add", added, not_found, name, show_menu=show_menu, lang=lang)
 
         if intent == "remove" and ingredients:
             removed, not_found = remove_ingredients(user_id, ingredients)
