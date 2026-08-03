@@ -186,68 +186,69 @@ def parse_pantry_intent_local(message: str, known_ingredients: list[str]) -> dic
 
 def parse_pantry_intent(message: str, known_ingredients: list[str]) -> dict:
     """
-    Use Claude AI if API key is set, otherwise fall back to local extraction.
+    Use Claude AI for complex messages, local extraction for simple ones.
     Returns: {intent: 'add'|'remove'|'none', ingredients: [...]}
     """
-    # Always try local first — fast and free
-    local = parse_pantry_intent_local(message, known_ingredients)
+    # For long messages or when API key available, use Claude directly
+    is_complex = len(message.split()) > 8 or "," in message
+    
+    if ANTHROPIC_API_KEY and is_complex:
+        # Use Claude for anything complex
+        known_str = ", ".join(known_ingredients[:150])
+        prompt = f"""You are a smart pantry assistant for a Kenyan cooking app. A user sent this WhatsApp message listing their ingredients:
 
-    # If local found something, use it
-    if local["ingredients"]:
-        return local
-
-    # Try Claude AI for harder cases (e.g. "picked up a few things at Carrefour")
-    if not ANTHROPIC_API_KEY:
-        return local
-
-    known_str = ", ".join(known_ingredients[:80])
-    prompt = f"""You are a smart pantry assistant for a Kenyan cooking app. A user sent this WhatsApp message:
 "{message}"
 
-Known ingredients in our database: {known_str}
+Your job: extract ALL food ingredients from this message and match them to our database.
 
-Decide if the user is:
-1. ADDING ingredients - includes ANY of these patterns:
-   - Explicit: "I have", "I bought", "just got", "nimenunua", "niko na"
-   - Listing with quantities: "one egg, two tomatoes, a packet of milk"
-   - Shopping list style: "one kitunguu, one egg, one packet of milk, rice, chicken"
-   - Any message that lists food items they currently possess
-2. REMOVING ingredients: "used up", "ran out", "finished", "imekwisha", "hakuna"
-3. NEITHER: asking for recipes, general chat
+Known ingredients database: {known_str}
 
-Handle Swahili/Kenyan names and map to English:
-- kitunguu = onions, mayai/yai = eggs, maziwa = milk, nyanya = tomatoes
-- kuku = chicken, nyama = beef, wali/mchele = rice, sukuma = sukuma wiki
-- nduma = arrowroots, muhogo = cassava, ndizi = bananas, karoti = carrots
-
-Extract only ingredients matching the known list. Ignore quantities like "one", "two", "a packet of".
+Rules:
+1. This is clearly an ADD message (user is listing what they have)
+2. Extract every food item mentioned, including spices, condiments, dairy, grains, proteins, vegetables
+3. Match to the closest name in our database (handle variants, quantities, descriptions):
+   - "a crate of eggs" → "eggs"
+   - "a kg of chicken legs" → "chicken legs" 
+   - "half a kg of minced meat" → "minced beef"
+   - "2 buds of garlic" → "garlic"
+   - "raw ginger" → "ginger"
+   - "gharam masala" → "garam masala"
+   - "Spanish paprika" → "paprika"
+   - "vanilla flavored Greek yogurt" → "greek yoghurt"
+   - "wheat flour" → "wheat flour"
+   - "maize flour" → "maize flour"
+   - "green/red/yellow capsicums" → "green capsicum", "red capsicum", "yellow capsicum"
+4. Only include items that exist in our database (exact or close match)
+5. Ignore quantities (kg, packets, crates etc)
 
 Respond ONLY with valid JSON:
-{{"intent": "add" | "remove" | "none", "ingredients": ["ingredient1", "ingredient2"]}}"""
+{{"intent": "add", "ingredients": ["ingredient1", "ingredient2", ...]}}"""
 
-    try:
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 200,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=8,
-        )
-        text = resp.json()["content"][0]["text"].strip()
-        text = re.sub(r"```json|```", "", text).strip()
-        result = json.loads(text)
-        log.info(f"🤖 Claude NLU: {result}")
-        return result
-    except Exception as e:
-        log.warning(f"Claude NLU failed: {e}, using local result")
-        return local
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 400,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=10,
+            )
+            text = resp.json()["content"][0]["text"].strip()
+            text = re.sub(r"```json|```", "", text).strip()
+            result = json.loads(text)
+            log.info(f"🤖 Claude NLU: found {len(result.get('ingredients', []))} ingredients")
+            return result
+        except Exception as e:
+            log.warning(f"Claude NLU failed: {e}")
+
+    # Fall back to local extraction for simple messages
+    return parse_pantry_intent_local(message, known_ingredients)
 
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
