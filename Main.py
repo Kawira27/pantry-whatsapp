@@ -510,8 +510,14 @@ def format_recipe(recipe: dict, show_nutrition: bool = True) -> str:
         lines.append("👨‍🍳 *Steps:*")
         step_list = steps if isinstance(steps, list) else str(steps).split("\n")
         for n, s in enumerate(step_list, 1):
-            if str(s).strip():
-                lines.append(f"  {n}. {str(s).strip()}")
+            s = str(s).strip()
+            if not s:
+                continue
+            # Remove existing "Step N." or "N." prefix to avoid double numbering
+            s = re.sub(r'^Step\s*\d+[\.\:]\s*', '', s, flags=re.IGNORECASE)
+            s = re.sub(r'^\d+[\.\:]\s*', '', s)
+            if s:
+                lines.append(f"  {n}. {s}")
         lines.append("")
 
     # Nutrition
