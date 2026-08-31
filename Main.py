@@ -1741,7 +1741,9 @@ def fetch_image_as_base64(url: str, media_type: str) -> str | None:
         twilio_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
         twilio_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
         auth = (twilio_sid, twilio_token) if twilio_sid and twilio_token else None
+        log.info(f"📸 Fetching image from Twilio | SID set: {bool(twilio_sid)} | Token set: {bool(twilio_token)}")
         resp = requests.get(url, auth=auth, timeout=15)
+        log.info(f"📸 Image fetch status: {resp.status_code}")
         resp.raise_for_status()
         return base64.standard_b64encode(resp.content).decode("utf-8")
     except Exception as e:
