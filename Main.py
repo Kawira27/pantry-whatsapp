@@ -374,7 +374,11 @@ def find_matching_recipes(pantry_names: list[str], user: dict, meal_type: str = 
         "recipe_ingredients(ingredients(name))"
     )
     if meal_type:
-        query = query.eq("meal_type", meal_type)
+        # Include quick meals alongside lunch/dinner
+        if meal_type in ("lunch", "dinner"):
+            query = query.in_("meal_type", [meal_type, "quick meal"])
+        else:
+            query = query.eq("meal_type", meal_type)
     res = query.execute()
 
     allergies = [a.lower() for a in (user.get("allergies") or [])]
@@ -1229,7 +1233,7 @@ def route(msg: str, user: dict) -> str:
 
         meal_type_map = {
             "1": "breakfast", "1️⃣": "breakfast",
-            "breakfast": "breakfast", "kiamsha kinywa": "breakfast", "morning": "breakfast",
+            "breakfast": "breakfast", "kiamsha kinywa": "breakfast", "morning": "morning",
             "2": "lunch", "2️⃣": "lunch",
             "lunch": "lunch", "chakula cha mchana": "lunch", "midday": "lunch",
             "3": "dinner", "3️⃣": "dinner",
@@ -1453,8 +1457,20 @@ def route(msg: str, user: dict) -> str:
         elif "snack" in m:
             meal_type = "snack"
 
-    if any(p in m.split() for p in ["cook", "recipe", "hungry", "food", "eat"]) or \
-       any(p in m for p in ["what are we", "what's cooking", "whats cooking"]) and not meal_type:
+    # "create recipe" and "generate recipe" must be handled BEFORE cook menu trigger
+    if any(p in m for p in ["create recipe", "generate recipe", "make me a recipe", "invent a recipe", "tengeneza recipe", "unda mapishi"]):
+        pantry = get_pantry_names(user_id)
+        if not pantry:
+            return t("ai_recipe_no_pantry", lang)
+        if not ANTHROPIC_API_KEY:
+            return t("ai_recipe_no_key", lang)
+        ai_recipe = generate_ai_recipe(pantry, user, meal_type)
+        if ai_recipe:
+            return t("ai_recipe_intro", lang) + format_recipe_with_followup(ai_recipe, user_id, lang=lang)
+        return t("ai_recipe_fail", lang)
+
+    if any(p in m.split() for p in ["cook", "hungry", "food", "eat"]) or \
+       any(p in m for p in ["what are we", "what's cooking", "whats cooking", "nini tunachopika"]) and not meal_type:
         # Show cook submenu
         lang = user.get("language", "en")
         update_user(user_id, {"awaiting_meal_type": True})
