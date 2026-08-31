@@ -1811,9 +1811,10 @@ Respond ONLY in valid JSON:
             timeout=20,
         )
         text = resp.json()["content"][0]["text"].strip()
+        log.info(f"📸 Claude raw response: {text[:500]}")
         text = re.sub(r"```json|```", "", text).strip()
         result = json.loads(text)
-        log.info(f"📸 Photo analysis: {result}")
+        log.info(f"📸 Photo analysis result: {result}")
         return result
     except Exception as e:
         log.warning(f"Photo analysis failed: {e}")
