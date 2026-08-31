@@ -1756,22 +1756,38 @@ def analyse_photo_with_claude(image_b64: str, media_type: str, known_ingredients
     if not ANTHROPIC_API_KEY:
         return {"ingredients_found": [], "image_type": "other"}
 
-    known_str = ", ".join(known_ingredients[:100])
-    prompt = f"""You are a smart pantry assistant. The user sent an image.
+    known_str = ", ".join(known_ingredients[:150])
+    prompt = f"""You are a smart pantry assistant for a Kenyan cooking app. The user sent an image of a receipt or fridge.
 
-First identify the image type: receipt/shopping list/till slip, fridge/pantry/food storage, or other.
+Your job: extract ALL food ingredients, groceries and produce visible. Be generous — if it could be a food ingredient, include it.
 
-Extract ALL food ingredients, groceries, produce visible. Cross-reference with our known ingredients: {known_str}
+Known ingredients in our database: {known_str}
 
-Match aliases and brand names:
-- "sukuma" -> "sukuma wiki"
-- "dhania" -> "coriander"
-- "free range eggs 6pk" -> "eggs"
-- "Afia tomatoes 400g" -> "tomatoes"
-- "uji flour" -> "unga"
+Image type detection:
+- receipt/till slip/shopping list → "receipt"  
+- fridge/freezer/pantry/food shelf → "fridge"
+- other → "other"
+
+Extraction rules:
+1. Extract EVERY food item — proteins, vegetables, grains, spices, condiments, dairy, oils, flours, sauces
+2. Match to closest name in our database. Be flexible with brand names, packaging descriptions, quantities:
+   - "Royco" → "curry powder" or "mixed spice"
+   - "Kasuku" → "cooking oil"
+   - "Daima milk 500ml" → "milk"
+   - "Chicken pieces 1kg" → "chicken"
+   - "Pilau masala 50g" → "pilau masala"
+   - "Garam masala" → "garam masala"
+   - "Cumin seeds" → "cumin"
+   - "Black pepper 100g" → "black pepper"
+   - "Tomato paste 70g" → "tomato paste"
+   - "Wheat flour 2kg" → "wheat flour"
+   - "Maize flour unga" → "maize flour"
+3. Ignore: toiletries, cleaning products, non-food items
+4. Include spices even if small quantities
+5. If item not in known list, still include it — we may add it
 
 Respond ONLY in valid JSON:
-{{"image_type": "receipt" | "fridge" | "other", "ingredients_found": ["ingredient1", "ingredient2"]}}"""
+{{"image_type": "receipt" | "fridge" | "other", "ingredients_found": ["ingredient1", "ingredient2", ...]}}"""
 
     try:
         resp = requests.post(
