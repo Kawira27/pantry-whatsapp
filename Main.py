@@ -1810,7 +1810,12 @@ Respond ONLY in valid JSON:
             },
             timeout=20,
         )
-        text = resp.json()["content"][0]["text"].strip()
+        api_response = resp.json()
+        log.info(f"📸 Claude API response keys: {list(api_response.keys())}")
+        if "content" not in api_response:
+            log.warning(f"📸 Claude API error: {api_response}")
+            return {"ingredients_found": [], "image_type": "other"}
+        text = api_response["content"][0]["text"].strip()
         log.info(f"📸 Claude raw response: {text[:500]}")
         text = re.sub(r"```json|```", "", text).strip()
         result = json.loads(text)
