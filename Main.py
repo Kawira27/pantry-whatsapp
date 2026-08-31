@@ -1,6 +1,3 @@
-from gevent import monkey
-monkey.patch_all()
-
 import os
 import re
 import json
@@ -18,6 +15,7 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 from collections import defaultdict
 from threading import Lock
+from translations import t
 
 load_dotenv()
 
@@ -463,7 +461,7 @@ def log_message(user_id: str, direction: str, body: str):
         log.warning(f"Could not log: {e}")
 
 
-def format_recipe(recipe: dict, show_nutrition: bool = True) -> str:
+def format_recipe(recipe: dict, show_nutrition: bool = True, lang: str = "en") -> str:
     ingredients = [
         ri["ingredients"]["name"]
         for ri in recipe.get("recipe_ingredients", [])
@@ -472,6 +470,9 @@ def format_recipe(recipe: dict, show_nutrition: bool = True) -> str:
     cuisine = recipe.get("cuisine", "")
     meal_type = recipe.get("meal_type", "")
     is_ai = recipe.get("is_ai_generated", False)
+    # Use Swahili name/description if available and user is Swahili
+    display_name = (recipe.get("name_sw") or recipe.get("name", "")) if lang == "sw" else recipe.get("name", "")
+    display_desc = (recipe.get("description_sw") or recipe.get("description", "")) if lang == "sw" else recipe.get("description", "")
 
     tag_parts = []
     if cuisine:
@@ -482,7 +483,7 @@ def format_recipe(recipe: dict, show_nutrition: bool = True) -> str:
         tag_parts.append("✨ AI recipe")
     tag = f"_{' • '.join(tag_parts)}_" if tag_parts else ""
 
-    lines = [f"🍽️ *{recipe['name']}*"]
+    lines = [f"🍽️ *{display_name}*"]
     if tag:
         lines.append(tag)
 
@@ -500,8 +501,8 @@ def format_recipe(recipe: dict, show_nutrition: bool = True) -> str:
         lines.append(f"⏱ _{' | '.join(timing)}_")
 
     lines.append("")
-    if recipe.get("description"):
-        lines += [recipe["description"], ""]
+    if display_desc:
+        lines += [display_desc, ""]
 
     if ingredients:
         lines.append("🛒 *Ingredients:*")
@@ -543,17 +544,18 @@ def format_recipe(recipe: dict, show_nutrition: bool = True) -> str:
     return "\n".join(lines)
 
 
-def format_near_match(recipe: dict) -> str:
+def format_near_match(recipe: dict, lang: str = "en") -> str:
     """Format a near-match recipe showing what's missing."""
     missing = recipe.get("missing", [])
     total = recipe.get("match_score", 0) + len(missing)
-    lines = [
-        f"🟡 *{recipe['name']}* _{recipe.get('cuisine', '')} • {recipe.get('meal_type', '')}_",
-        f"You have *{recipe['match_score']}/{total}* ingredients",
-        f"Missing: {', '.join(missing)}",
-        f"Reply *shopping list* to add missing items, or *cook anyway* to see the full recipe."
-    ]
-    return "\n".join(lines)
+    return t("near_match_card", lang,
+        name=recipe["name"],
+        cuisine=recipe.get("cuisine", ""),
+        meal_type=recipe.get("meal_type", ""),
+        have=recipe["match_score"],
+        total=total,
+        missing=", ".join(missing)
+    )
 
 
 def format_recipe_with_followup(recipe: dict, user_id: str, missing: list = None) -> str:
@@ -731,10 +733,10 @@ def create_shopping_list(user_id: str, items: list[str], name: str = "Shopping L
     return res.data[0] if res.data else {}
 
 
-def format_shopping_list(items: list[str], name: str = "Shopping List") -> str:
-    lines = [f"🛒 *{name}*", f"_{len(items)} item(s)_", ""]
+def format_shopping_list(items: list[str], name: str = "Shopping List", lang: str = "en") -> str:
+    lines = [t("shopping_list_header", lang, name=name, count=len(items))]
     lines += [f"  ☐ {item}" for item in items]
-    lines += ["", "Reply *done shopping* when you're back — I'll add everything to your pantry!"]
+    lines += ["", t("shopping_list_footer", lang)]
     return "\n".join(lines)
 
 
@@ -764,7 +766,7 @@ def shopping_list_for_recipe(recipe_name: str, user_id: str, pantry_names: list[
 
 # ── Phase 2: Nutrition Summary ─────────────────────────────────────────────────
 
-def get_nutrition_summary(user_id: str) -> str:
+def get_nutrition_summary(user_id: str, lang: str = "en") -> str:
     """Get nutrition summary from recent suggestions."""
     res = (
         supabase.table("user_recipe_suggestions")
@@ -777,7 +779,7 @@ def get_nutrition_summary(user_id: str) -> str:
 
     recipes = [r["recipes"] for r in res.data if r.get("recipes") and r["recipes"].get("calories_per_serving")]
     if not recipes:
-        return "📊 No nutrition data yet — cook some recipes first and I'll track your stats!"
+        return t("nutrition_empty", lang)
 
     total_cal = sum(r["calories_per_serving"] for r in recipes if r.get("calories_per_serving"))
     total_protein = sum(float(r["protein_g"] or 0) for r in recipes)
@@ -1048,30 +1050,29 @@ def format_pantry_update(action: str, items: list[str], not_found: list[str], na
         real_adds = [i for i in items if "(already" not in i]
         already = [i for i in items if "(already" in i]
         if real_adds:
-            lines.append(f"✅ Added to your pantry ({len(real_adds)} items):")
+            lines.append(t("pantry_added_header", lang, count=len(real_adds)))
             lines += [f"  • {i}" for i in real_adds]
         if already:
-            lines.append("\n📌 Already in your pantry:")
+            lines.append(t("pantry_already_header", lang))
             lines += [f"  • {i.replace(' (already in pantry)', '')}" for i in already]
     else:
         if items:
-            lines.append("🗑️ Removed from your pantry:")
+            lines.append(t("pantry_removed_header", lang))
             lines += [f"  • {i}" for i in items]
 
     if not_found:
-        lines.append("\n❓ Didn't recognise:")
+        lines.append(t("pantry_not_found", lang))
         lines += [f"  • {i}" for i in not_found]
-        lines.append("  _(Try different spelling or add them via pantry menu)_")
+        lines.append(t("pantry_not_found_hint", lang))
 
     if not lines:
-        return f"🤔 Hmm, I couldn't find those ingredients, {name}. Try being more specific!"
+        return t("pantry_not_found_empty", lang, name=name)
 
     if show_menu:
-        # After first pantry stock — show main menu
-        lines += ["", f"Your pantry is ready! Here's what you can do next, {name}:"]
+        lines += ["", t("pantry_ready_with_menu", lang, name=name)]
         lines += ["", main_menu(name, lang)]
     else:
-        lines += ["", "🍳 Reply *cook* when you're ready for a recipe!"]
+        lines += ["", t("pantry_ready_footer", lang)]
     return "\n".join(lines)
 
 
@@ -1116,7 +1117,7 @@ def route(msg: str, user: dict) -> str:
                 return "\n".join(lines)
         elif m in COOK_SOME_TRIGGERS:
             update_user(user_id, {"awaiting_cooking_confirmation": False})
-            return "Which ingredients did you use? Just tell me naturally:\n_'I used the eggs and tomatoes'_"
+            return t("used_some", lang)
         elif m in COOK_DENY_TRIGGERS:
             update_user(user_id, {"awaiting_cooking_confirmation": False})
             return f"👍 No problem! Your pantry stays as is.\n\n" + main_menu(name, user.get('language', 'en'))
@@ -1254,7 +1255,7 @@ def route(msg: str, user: dict) -> str:
         elif m.strip() in ("4", "4️⃣", "help", "msaada"):
             return main_menu(name, lang)
         elif m.strip() in ("5", "5️⃣", "exit", "bye", "goodbye", "toka"):
-            return f"👋 Goodbye {name}! Come back when you're hungry 😄\nReply *hi* anytime to get started again."
+            return t("goodbye", lang, name=name)
 
     # PANTRY SUBMENU HANDLER
     if user.get("awaiting_pantry_action"):
@@ -1269,9 +1270,9 @@ def route(msg: str, user: dict) -> str:
             lines += ["", "➕ _add [ingredient]_ to add more", "➖ _remove [ingredient]_ to remove"]
             return "\n".join(lines)
         elif m in ("2", "add", "ongeza"):
-            return f"What did you get, {name}? Just tell me naturally:\n\n_\"I bought chicken and tomatoes\"_\n_\"Nimenunua mayai na unga\"_\n\nOr send a 📸 photo of your fridge or receipt!"
+            return t("pantry_add_prompt", lang, name=name)
         elif m in ("3", "remove", "ondoa"):
-            return f"What would you like to remove from your pantry?\n\n_\"I used up the rice\"_\n_\"Nimemaliza sukuma wiki\"_"
+            return t("pantry_remove_prompt", lang)
         elif m in ("4", "shopping list", "shopping", "orodha"):
             pantry = get_pantry_names(user_id)
             near = find_near_matches(pantry, user)
@@ -1283,9 +1284,9 @@ def route(msg: str, user: dict) -> str:
                 if unique_missing:
                     create_shopping_list(user_id, unique_missing, "Pantry Top-Up")
                     return format_shopping_list(unique_missing, "Pantry Top-Up")
-            return "🛒 Your pantry already covers most recipes! Reply *cook* to see what you can make."
+            return t("shopping_list_full", lang)
         elif m in ("5", "photo", "picha"):
-            return f"📸 Send me a photo of your fridge or shopping receipt and I'll add the ingredients automatically!"
+            return t("pantry_photo_prompt", lang)
         elif m in ("6", "back", "rudi"):
             return main_menu(name, lang)
         else:
@@ -1635,7 +1636,7 @@ def route(msg: str, user: dict) -> str:
             supabase.table("shopping_lists").delete().eq("user_id", user_id).execute()
             supabase.table("user_recipe_suggestions").delete().eq("user_id", user_id).execute()
             supabase.table("users").delete().eq("id", user_id).execute()
-            log.info(f"🗑️ Account deleted for {from_number}")
+            log.info(f"🗑️ Account deleted for {user.get('whatsapp_number', user_id)}")
             return (
                 "✅ Your account and all associated data has been permanently deleted.\n\n"
                 "We're sorry to see you go. If you ever want to come back, "
@@ -1655,7 +1656,7 @@ def route(msg: str, user: dict) -> str:
         ai_recipe = generate_ai_recipe(pantry, user, meal_type)
         if ai_recipe:
             return "✨ *I created a recipe just for you!*\n\n" + format_recipe_with_followup(ai_recipe, user_id)
-        return "😕 Couldn't generate a recipe right now. Try again in a moment!"
+        return t("ai_recipe_fail", lang)
 
     # SHOPPING LIST
     if "shopping list" in m or m == "shopping":
@@ -1672,13 +1673,13 @@ def route(msg: str, user: dict) -> str:
             if unique_missing:
                 create_shopping_list(user_id, unique_missing, "Pantry Top-Up")
                 return format_shopping_list(unique_missing, "Pantry Top-Up")
-        return "🛒 Your pantry already covers most recipes! Reply *cook* to see what you can make."
+        return t("shopping_list_full", lang)
 
     # DONE SHOPPING
     if "done shopping" in m or m in ("done", "back from shopping"):
         shopping = get_shopping_list(user_id)
         if not shopping:
-            return "I don't have an active shopping list for you. Reply *shopping list* to create one!"
+            return t("no_active_shopping_list", lang)
         items = json.loads(shopping.get("items", "[]")) if isinstance(shopping.get("items"), str) else shopping.get("items", [])
         added, not_found = add_ingredients(user_id, items)
         supabase.table("shopping_lists").update({"is_complete": True}).eq("id", shopping["id"]).execute()
@@ -1697,7 +1698,7 @@ def route(msg: str, user: dict) -> str:
         ai_recipe = generate_ai_recipe(pantry, user, meal_type)
         if ai_recipe:
             return "✨ *I created a recipe just for you!*\n\n" + format_recipe_with_followup(ai_recipe, user_id)
-        return "😕 Couldn't generate a recipe right now. Try again in a moment!"
+        return t("ai_recipe_fail", lang)
 
     # NUTRITION
     if any(p in m for p in ["nutrition", "calories", "macros", "health stats", "lishe"]):
@@ -1886,84 +1887,21 @@ def send_message(to: str, text: str):
 
 
 def main_menu(name: str, lang: str = "en") -> str:
-    """Return the main menu as rich text with numbered options."""
-    if lang == "sw":
-        return (
-            f"Habari {name}! 👋 Naweza kukusaidia nini?\n\n"
-            "1️⃣  🍳 *Pika* — Pata mapishi\n"
-            "2️⃣  🧺 *Pantry* — Angalia viungo vyako\n"
-            "3️⃣  👤 *Wasifu* — Mapendeleo yako\n"
-            "4️⃣  ❓ *Msaada* — Maagizo yote\n"
-            "5️⃣  👋 *Toka* — Funga menyu\n\n"
-            "_Au niambie una nini nyumbani: 'Nina mayai na nyanya'_\n"
-            "_Piga picha ya friji yako 📸_"
-        )
-    return (
-        f"Hey {name}! 👋 What can I do for you?\n\n"
-        "1️⃣  🍳 *Cook* — Get recipe suggestions\n"
-        "2️⃣  🧺 *Pantry* — View or update ingredients\n"
-        "3️⃣  👤 *Profile* — View & edit preferences\n"
-        "4️⃣  ❓ *Help* — See all commands\n"
-        "5️⃣  👋 *Exit* — Close the menu\n\n"
-        "_Or just tell me what you have: 'I bought tomatoes and eggs'_\n"
-        "_Send a photo of your fridge or receipt 📸_"
-    )
+    """Return the main menu."""
+    return t("main_menu", lang, name=name)
 
 
 def pantry_menu(name: str, lang: str = "en") -> str:
     """Pantry submenu."""
-    if lang == "sw":
-        return (
-            f"🧺 *Pantry yako*, {name}\n\n"
-            "1️⃣  👀 *Angalia* — Viungo vilivyopo\n"
-            "2️⃣  ➕ *Ongeza* — Ongeza viungo\n"
-            "3️⃣  ➖ *Ondoa* — Ondoa kiungo\n"
-            "4️⃣  🛒 *Orodha ya manunuzi* — Shopping list\n"
-            "5️⃣  📸 *Picha* — Piga picha ya friji/risiti\n"
-            "6️⃣  👋 *Rudi* — Rudi kwenye menyu\n\n"
-            "_Au niambie moja kwa moja: 'Nina nyanya na vitunguu'_"
-        )
-    return (
-        f"🧺 *Your Pantry*, {name}\n\n"
-        "1️⃣  👀 *View* — See what you have\n"
-        "2️⃣  ➕ *Add* — Add ingredients\n"
-        "3️⃣  ➖ *Remove* — Remove an ingredient\n"
-        "4️⃣  🛒 *Shopping list* — What to buy\n"
-        "5️⃣  📸 *Photo* — Scan fridge or receipt\n"
-        "6️⃣  👋 *Back* — Back to main menu\n\n"
-        "_Or just tell me naturally: 'I bought chicken and tomatoes'_"
-    )
-
-
+    return t("pantry_menu", lang, name=name)
 def profile_menu(name: str, lang: str = "en") -> str:
     """Profile submenu."""
-    if lang == "sw":
-        return (
-            f"👤 *Wasifu wako*, {name}\n\n"
-            "1️⃣  👀 *Angalia wasifu* — Mapendeleo yako\n"
-            "2️⃣  ✏️ *Hariri* — Badilisha mapendeleo\n"
-            "3️⃣  📊 *Lishe* — Muhtasari wa lishe\n"
-            "4️⃣  ⭐ *Mapishi yangu* — Mapishi yaliyohifadhiwa\n"
-            "5️⃣  👋 *Rudi* — Rudi kwenye menyu"
-        )
-    return (
-        f"👤 *Your Profile*, {name}\n\n"
-        "1️⃣  👀 *View profile* — Your preferences\n"
-        "2️⃣  ✏️ *Edit* — Update preferences\n"
-        "3️⃣  📊 *Nutrition* — Your nutrition summary\n"
-        "4️⃣  ⭐ *Saved recipes* — Your favourites\n"
-        "5️⃣  👋 *Back* — Back to main menu"
-    )
+    return t("profile_menu", lang, name=name)
 
 
-def cooking_followup(recipe_name: str) -> str:
+def cooking_followup(recipe_name: str, lang: str = "en") -> str:
     """Ask user if they cooked or used ingredients after a recipe suggestion."""
-    return (
-        f"Did you end up cooking *{recipe_name}*? 👨‍🍳\n\n"
-        "1️⃣  ✅ *Yes, I cooked it* — remove ingredients from pantry\n"
-        "2️⃣  🥕 *Used some ingredients* — tell me which ones\n"
-        "3️⃣  ❌ *Not yet* — keep pantry as is"
-    )
+    return t("cooking_followup", lang, recipe_name=recipe_name)
 
 
 # ── Webhook ────────────────────────────────────────────────────────────────────
