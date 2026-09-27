@@ -715,7 +715,11 @@ Respond ONLY with valid JSON (no markdown):
         return full.data[0] if full.data else None
 
     except Exception as e:
-        log.warning(f"AI recipe generation failed: {e}")
+        err = str(e).lower()
+        if "credit" in err or "billing" in err or "balance" in err:
+            log.warning("Anthropic credits exhausted")
+        else:
+            log.warning(f"AI recipe generation failed: {e}")
         return None
 
 
@@ -1207,6 +1211,121 @@ def route(msg: str, user: dict) -> str:
             log.warning(f"Recipe selection error: {e}")
         update_user(user_id, {"pending_recipe_options": None})
 
+    # CHEF CHAT HANDLER — natural language recipe requests
+    if user.get("awaiting_chef_chat") or any(p in m for p in [
+        "vegan", "vegetarian", "meat", "chicken only", "beef only",
+        "quick", "under 20", "under 30", "fast", "easy", "simple",
+        "spicy", "mild", "high protein", "low carb", "healthy",
+        "give me", "suggest", "recommend", "what can i make with",
+        "ninaweza kupika", "ninapenda", "nataka chaguo"
+    ]):
+        if user.get("awaiting_chef_chat") or any(p in m for p in [
+            "vegan", "vegetarian", "meat", "chicken only", "give me",
+            "suggest", "recommend", "quick", "spicy", "healthy",
+            "high protein", "low carb", "what can i make", "ninaweza kupika"
+        ]):
+            update_user(user_id, {"awaiting_chef_chat": False})
+            pantry = get_pantry_names(user_id)
+            if not pantry:
+                return t("pantry_empty", lang, name=name)
+
+            # Use Claude to interpret the request and filter recipes
+            if ANTHROPIC_API_KEY:
+                all_recipes = supabase.table("recipes").select(
+                    "id, name, description, cuisine, meal_type, "
+                    "prep_time_minutes, cook_time_minutes, difficulty, "
+                    "calories_per_serving, protein_g, avg_rating, "
+                    "recipe_ingredients(ingredients(name))"
+                ).execute().data or []
+
+                # Filter to recipes user can make (has at least 50% ingredients)
+                candidate_recipes = []
+                for r in all_recipes:
+                    r_ings = [ri["ingredients"]["name"].lower()
+                              for ri in r.get("recipe_ingredients", [])
+                              if ri.get("ingredients")]
+                    if not r_ings:
+                        continue
+                    matches = sum(1 for i in r_ings if i in pantry)
+                    if matches / len(r_ings) >= 0.5:
+                        r["match_pct"] = round(matches / len(r_ings) * 100)
+                        candidate_recipes.append(r)
+
+                recipe_list = "\n".join([
+                    f"- {r['name']} ({r.get('cuisine','')}, {r.get('meal_type','')}, "
+                    f"{(r.get('prep_time_minutes') or 0) + (r.get('cook_time_minutes') or 0)}min, "
+                    f"protein: {r.get('protein_g','?')}g, match: {r.get('match_pct',0)}%)"
+                    for r in candidate_recipes[:40]
+                ])
+
+                prompt = f"""A user of a Kenyan cooking app said: "{msg}"
+
+Their pantry contains: {", ".join(pantry)}
+
+Available recipes they can make (at least 50% of ingredients):
+{recipe_list}
+
+Pick the 3-5 BEST recipes matching their request. Consider:
+- Their specific request (vegan = no meat/fish, spicy = pilau/curry, quick = under 25min etc)
+- Match percentage (higher is better)
+- Variety
+
+Return ONLY valid JSON:
+{{"recipes": ["Recipe Name 1", "Recipe Name 2", "Recipe Name 3"], "message": "One friendly sentence explaining your picks"}}"""
+
+                try:
+                    resp = requests.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                        json={"model": "claude-haiku-4-5-20251001", "max_tokens": 300,
+                              "messages": [{"role": "user", "content": prompt}]},
+                        timeout=10,
+                    )
+                    text = resp.json()["content"][0]["text"].strip()
+                    text = re.sub(r"```json|```", "", text).strip()
+                    chef_result = json.loads(text)
+                    suggested_names = chef_result.get("recipes", [])
+                    chef_message = chef_result.get("message", "Here are my picks for you!")
+
+                    # Find matching recipe objects
+                    shown = []
+                    for rname in suggested_names:
+                        for r in candidate_recipes:
+                            if r["name"].lower() == rname.lower():
+                                shown.append(r)
+                                break
+
+                    if shown:
+                        option_ids = [str(r["id"]) for r in shown]
+                        update_user(user_id, {"pending_recipe_options": json.dumps(option_ids)})
+                        lines = [f"👨‍🍳 {chef_message}\n"]
+                        for i, r in enumerate(shown, 1):
+                            cuisine = r.get("cuisine", "")
+                            mtype = r.get("meal_type", "")
+                            total_time = (r.get("prep_time_minutes") or 0) + (r.get("cook_time_minutes") or 0)
+                            rating = r.get("avg_rating")
+                            stars = f"⭐{rating:.1f}" if rating else ""
+                            lines.append(f"{i}️⃣ 🟢 *{r['name']}* _{cuisine} • {mtype}_ ⏱{total_time}min {stars}")
+                        lines.append(f"\nReply *1*–*{len(shown)}* to see the full recipe!")
+                        return "\n".join(lines)
+                except Exception as e:
+                    log.warning(f"Chef chat AI failed: {e}")
+
+            # Fallback — show regular recipe suggestions
+            matches = find_matching_recipes(pantry, user)
+            if matches:
+                shown = matches[:5]
+                option_ids = [str(r["id"]) for r in shown]
+                update_user(user_id, {"pending_recipe_options": json.dumps(option_ids)})
+                lines = [f"🍳 *Here are some options for you, {name}:*\n"]
+                for i, r in enumerate(shown, 1):
+                    total_time = (r.get("prep_time_minutes") or 0) + (r.get("cook_time_minutes") or 0)
+                    lines.append(f"{i}️⃣ 🟢 *{r['name']}* _{r.get('cuisine','')} • {r.get('meal_type','')}_  ⏱{total_time}min")
+                lines.append(f"\nReply *1*–*{len(shown)}* to see the full recipe!")
+                return "\n".join(lines)
+
+            return t("no_recipe_match", lang, name=name)
+
     # MEAL TYPE SELECTION (when user was shown the cook menu)
     awaiting_meal = user.get("awaiting_meal_type", False)
     if awaiting_meal:
@@ -1214,8 +1333,31 @@ def route(msg: str, user: dict) -> str:
         lang = user.get("language", "en")
 
         # Handle back to menu
-        if m in ("7", "back", "back to menu", "rudi", "menu"):
+        if m in ("8", "back", "back to menu", "rudi", "menu"):
             return main_menu(name, lang)
+
+        # Handle chat with chef
+        if m in ("7", "chat with chef", "zungumza na mpishi", "chef"):
+            update_user(user_id, {"awaiting_chef_chat": True})
+            if lang == "sw":
+                return (
+                    f"👨‍🍳 Niambie unataka nini, {name}!\n\n"
+                    "Unaweza kusema:\n"
+                    "💬 _'Nataka chaguo za nyama'_\n"
+                    "💬 _'Kitu cha vegan'_\n"
+                    "💬 _'Chakula cha haraka chini ya dakika 20'_\n"
+                    "💬 _'Kitu chenye protini nyingi'_\n"
+                    "💬 _'Nina kuku na nyanya, napika nini?'_"
+                )
+            return (
+                f"👨‍🍳 Tell me what you're in the mood for, {name}!\n\n"
+                "You can say things like:\n"
+                "💬 _'Give me meat options'_\n"
+                "💬 _'Something vegan'_\n"
+                "💬 _'Something quick under 20 minutes'_\n"
+                "💬 _'High protein breakfast'_\n"
+                "💬 _'I have chicken and tomatoes, what can I make?'_"
+            )
 
         # Handle saved recipes
         if m in ("6", "saved recipes", "saved", "mapishi yangu"):
@@ -1483,7 +1625,8 @@ def route(msg: str, user: dict) -> str:
                 "4️⃣ 🍿 *Vitafunio* — Snack\n"
                 "5️⃣ 🎲 *Chochote* — Surprise me!\n"
                 "6️⃣ ⭐ *Mapishi yangu* — Saved recipes\n"
-                "7️⃣ 👋 *Rudi* — Back to menu"
+                "7️⃣ 👨‍🍳 *Zungumza na mpishi* — vegan, kali, ya haraka...\n"
+                "8️⃣ 👋 *Rudi* — Back to menu"
             )
         return (
             f"What are we cooking today, {name}? 🍳\n\n"
@@ -1493,7 +1636,8 @@ def route(msg: str, user: dict) -> str:
             "4️⃣ 🍿 *Snack*\n"
             "5️⃣ 🎲 *Surprise me!*\n"
             "6️⃣ ⭐ *Saved recipes*\n"
-            "7️⃣ 👋 *Back to menu*"
+            "7️⃣ 👨‍🍳 *Chat with chef* — vegan, spicy, quick...\n"
+            "8️⃣ 👋 *Back to menu*"
         )
 
     if meal_type or m in ("5", "surprise me", "surprise", "chochote"):
@@ -1757,34 +1901,35 @@ def analyse_photo_with_claude(image_b64: str, media_type: str, known_ingredients
         return {"ingredients_found": [], "image_type": "other"}
 
     known_str = ", ".join(known_ingredients[:150])
-    prompt = f"""You are a smart pantry assistant for a Kenyan cooking app. The user sent an image of a receipt or fridge.
+    prompt = f"""You are a smart pantry assistant for a Kenyan cooking app. The user sent an image showing their food/ingredients.
 
-Your job: extract ALL food ingredients, groceries and produce visible. Be generous — if it could be a food ingredient, include it.
+Your job: extract ALL food ingredients visible in the image.
+
+Image type:
+- "receipt" = shopping receipt, till slip, or written shopping list
+- "fridge" = fridge, freezer, pantry shelf, spice drawer, kitchen counter with food, ANY place where food/ingredients are stored or displayed
+- "other" = clearly not food related (e.g. a selfie, outdoor scene, document)
+
+IMPORTANT: Be very generous — spice drawers, spice racks, kitchen shelves, countertops with ingredients ALL count as "fridge" type.
 
 Known ingredients in our database: {known_str}
 
-Image type detection:
-- receipt/till slip/shopping list → "receipt"  
-- fridge/freezer/pantry/food shelf → "fridge"
-- other → "other"
-
 Extraction rules:
-1. Extract EVERY food item — proteins, vegetables, grains, spices, condiments, dairy, oils, flours, sauces
-2. Match to closest name in our database. Be flexible with brand names, packaging descriptions, quantities:
-   - "Royco" → "curry powder" or "mixed spice"
-   - "Kasuku" → "cooking oil"
-   - "Daima milk 500ml" → "milk"
-   - "Chicken pieces 1kg" → "chicken"
-   - "Pilau masala 50g" → "pilau masala"
-   - "Garam masala" → "garam masala"
-   - "Cumin seeds" → "cumin"
-   - "Black pepper 100g" → "black pepper"
-   - "Tomato paste 70g" → "tomato paste"
-   - "Wheat flour 2kg" → "wheat flour"
-   - "Maize flour unga" → "maize flour"
-3. Ignore: toiletries, cleaning products, non-food items
-4. Include spices even if small quantities
-5. If item not in known list, still include it — we may add it
+1. Extract EVERY food item visible — spices, condiments, proteins, vegetables, grains, oils, flours, sauces, dairy
+2. Match to closest name in database. Be flexible:
+   - "Royco" → "mixed spice" or "curry powder"
+   - "Pilau masala" → "pilau masala"
+   - "Garam masala" / "Garama masala" → "garam masala"
+   - "Cumin" / "jeera" → "cumin"
+   - "Coriander" / "dhania" → "coriander powder"
+   - "Paprika" → "paprika"
+   - "Tumeric" / "turmeric" → "turmeric"
+   - "Chilli flakes" → "chilli flakes"
+   - "Black pepper" → "black pepper"
+   - "Salt" → "salt"
+   - Any spice jar/packet = include it
+3. Ignore toiletries, cleaning products, non-food items
+4. If item not exactly in database, include your best match anyway
 
 Respond ONLY in valid JSON:
 {{"image_type": "receipt" | "fridge" | "other", "ingredients_found": ["ingredient1", "ingredient2", ...]}}"""
@@ -1813,7 +1958,10 @@ Respond ONLY in valid JSON:
         api_response = resp.json()
         log.info(f"📸 Claude API response keys: {list(api_response.keys())}")
         if "content" not in api_response:
+            error_msg = api_response.get("error", {}).get("message", "")
             log.warning(f"📸 Claude API error: {api_response}")
+            if "credit" in error_msg.lower() or "balance" in error_msg.lower():
+                return {"ingredients_found": [], "image_type": "no_credits"}
             return {"ingredients_found": [], "image_type": "other"}
         text = api_response["content"][0]["text"].strip()
         log.info(f"📸 Claude raw response: {text[:500]}")
@@ -1822,7 +1970,11 @@ Respond ONLY in valid JSON:
         log.info(f"📸 Photo analysis result: {result}")
         return result
     except Exception as e:
-        log.warning(f"Photo analysis failed: {e}")
+        err = str(e).lower()
+        if "credit" in err or "billing" in err or "balance" in err:
+            log.warning("Anthropic credits exhausted - photo analysis unavailable")
+        else:
+            log.warning(f"Photo analysis failed: {e}")
         return {"ingredients_found": [], "image_type": "other"}
 
 
@@ -1846,10 +1998,19 @@ def handle_photo(media_url: str, media_type: str, user: dict) -> str:
     found = result.get("ingredients_found", [])
     image_type = result.get("image_type", "other")
 
-    if image_type == "other" or not found:
+    log.info(f"📸 Image type: {image_type} | Found: {found}")
+
+    if image_type == "no_credits":
+        if lang == "sw":
+            return "📸 Uchanganuzi wa picha haufanyi kazi kwa sasa.\n\nBado unaweza kuongeza viungo kwa kuandika:\n_'Nina nyanya, mayai na kuku'_"
+        return "📸 Photo scanning is temporarily unavailable.\n\nYou can still add ingredients by typing:\n_'I have tomatoes, eggs and chicken'_"
+
+    if not found:
         return (
             f"🤔 I couldn't spot any ingredients in that photo, {name}.\n\n"
-            "Try sending a photo of your fridge or shopping receipt.\n\n"
+            "Try sending:\n"
+            "📸 A clearer photo of your spices, fridge or pantry shelf\n"
+            "🧾 A photo of your shopping receipt\n\n"
             "Or just type: _I have tomatoes, eggs, garlic_"
         )
 
