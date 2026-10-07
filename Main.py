@@ -1990,58 +1990,124 @@ Respond ONLY in valid JSON:
         return {"ingredients_found": [], "image_type": "other"}
 
 
-def handle_photo(media_url: str, media_type: str, user: dict) -> str:
+def handle_photo(media_files: list[dict], user: dict) -> str:
+    """
+    Analyse one or more photos and merge all found ingredients.
+    media_files: [{"url": "...", "type": "image/jpeg"}, ...]
+    """
     name = user.get("full_name", "Friend")
     user_id = user["id"]
     lang = user.get("language", "en")
+    sw = lang == "sw"
 
     if not ANTHROPIC_API_KEY:
-        return (
-            "📸 I can see your photo, but I need an AI key to analyse it.\n\n"
-            "For now, just tell me what you have:\n_I have tomatoes, eggs, milk_"
-        )
-
-    image_b64 = fetch_image_as_base64(media_url, media_type)
-    if not image_b64:
-        return "😕 I couldn't download your photo. Please try again or tell me what you have in text!"
+        if sw:
+            return "📸 Naona picha yako, lakini nahitaji ufunguo wa AI kuisoma.\n\nKwa sasa, niambie tu una nini:\n_Nina nyanya, mayai, maziwa_"
+        return "📸 I can see your photo, but I need an AI key to analyse it.\n\nFor now, just tell me what you have:\n_I have tomatoes, eggs, milk_"
 
     all_ingredients = get_all_ingredient_names()
-    result = analyse_photo_with_claude(image_b64, media_type, all_ingredients)
-    found = result.get("ingredients_found", [])
-    image_type = result.get("image_type", "other")
+    all_found = []
+    no_credits = False
+    failed_count = 0
+    image_types = []
 
-    log.info(f"📸 Image type: {image_type} | Found: {found}")
+    for idx, media in enumerate(media_files):
+        log.info(f"📸 Processing photo {idx + 1}/{len(media_files)}")
+        image_b64 = fetch_image_as_base64(media["url"], media["type"])
+        if not image_b64:
+            failed_count += 1
+            continue
 
-    if image_type == "no_credits":
-        if lang == "sw":
+        result = analyse_photo_with_claude(image_b64, media["type"], all_ingredients)
+        image_type = result.get("image_type", "other")
+        found = result.get("ingredients_found", [])
+
+        if image_type == "no_credits":
+            no_credits = True
+            break
+
+        image_types.append(image_type)
+        log.info(f"📸 Photo {idx + 1}: type={image_type} | found={found}")
+        all_found.extend(found)
+
+    if no_credits:
+        if sw:
             return "📸 Uchanganuzi wa picha haufanyi kazi kwa sasa.\n\nBado unaweza kuongeza viungo kwa kuandika:\n_'Nina nyanya, mayai na kuku'_"
         return "📸 Photo scanning is temporarily unavailable.\n\nYou can still add ingredients by typing:\n_'I have tomatoes, eggs and chicken'_"
 
-    if not found:
+    if failed_count == len(media_files):
+        if sw:
+            return "😕 Sikuweza kupakua picha zako. Tafadhali jaribu tena!"
+        return "😕 I couldn't download your photos. Please try again or tell me what you have in text!"
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_found = []
+    for item in all_found:
+        key = item.lower()
+        if key not in seen:
+            seen.add(key)
+            unique_found.append(item)
+
+    if not unique_found:
+        if sw:
+            return (
+                f"🤔 Sikuona viungo vyovyote kwenye picha hizo, {name}.\n\n"
+                "Jaribu kutuma:\n"
+                "📸 Picha ya friji/pantry yako\n"
+                "🧾 Picha ya risiti yako\n\n"
+                "Au andika tu: _Nina nyanya, mayai, vitunguu saumu_"
+            )
         return (
-            f"🤔 I couldn't spot any ingredients in that photo, {name}.\n\n"
+            f"🤔 I couldn't spot any ingredients in those photos, {name}.\n\n"
             "Try sending:\n"
-            "📸 A clearer photo of your spices, fridge or pantry shelf\n"
+            "📸 A clearer photo of your fridge or pantry\n"
             "🧾 A photo of your shopping receipt\n\n"
             "Or just type: _I have tomatoes, eggs, garlic_"
         )
 
-    update_user(user_id, {"pending_photo_ingredients": json.dumps(found)})
+    update_user(user_id, {"pending_photo_ingredients": json.dumps(unique_found)})
 
-    type_emoji = "🧾" if image_type == "receipt" else "🧊"
-    type_label = "receipt" if image_type == "receipt" else "fridge/pantry"
-    lines = [
-        f"{type_emoji} *I analysed your {type_label}!*",
-        f"Found {len(found)} ingredient(s):", "",
-    ]
-    lines += [f"  • {i}" for i in found]
-    lines += [
-        "",
-        "Shall I add all of these to your pantry?", "",
-        "✅ Reply *yes* to add them all",
-        "❌ Reply *no* to cancel",
-        "✏️ Or say what to skip: _yes but skip the milk_",
-    ]
+    # Build summary header
+    photo_count = len(media_files)
+    has_receipt = "receipt" in image_types
+    has_fridge = any(t in ("fridge", "other") for t in image_types)
+
+    if photo_count == 1:
+        type_emoji = "🧾" if has_receipt else "🧊"
+        type_label = ("risiti" if sw else "receipt") if has_receipt else ("friji/pantry" if sw else "fridge/pantry")
+        if sw:
+            header = f"{type_emoji} *Nimechunguza {type_label} yako!*"
+        else:
+            header = f"{type_emoji} *I analysed your {type_label}!*"
+    else:
+        if sw:
+            header = f"📸 *Nimechunguza picha {photo_count} zako!*"
+        else:
+            header = f"📸 *I analysed all {photo_count} photos!*"
+
+    if sw:
+        count_line = f"Nimepata viungo {len(unique_found)}:"
+        confirm_lines = [
+            "",
+            "Niziongeze zote kwenye pantry yako?", "",
+            "✅ Andika *ndiyo* kuziongeza zote",
+            "❌ Andika *hapana* kufuta",
+            "✏️ Au sema unataka kuruka: _ndiyo lakini ruka maziwa_",
+        ]
+    else:
+        count_line = f"Found {len(unique_found)} ingredient(s) across all photos:"
+        confirm_lines = [
+            "",
+            "Shall I add all of these to your pantry?", "",
+            "✅ Reply *yes* to add them all",
+            "❌ Reply *no* to cancel",
+            "✏️ Or say what to skip: _yes but skip the milk_",
+        ]
+
+    lines = [header, count_line, ""]
+    lines += [f"  • {i}" for i in unique_found]
+    lines += confirm_lines
     return "\n".join(lines)
 
 
@@ -2087,11 +2153,17 @@ def whatsapp():
     body = sanitise_input(request.values.get("Body", ""))
     from_number = request.values.get("From", "").strip()
     profile_name = sanitise_input(request.values.get("ProfileName", ""))
-    media_url = request.values.get("MediaUrl0", "").strip()
-    media_type = request.values.get("MediaContentType0", "").strip()
     num_media = int(request.values.get("NumMedia", "0"))
 
-    log.info(f"📩 From={from_number} | Body={body!r} | Media={num_media}")
+    # Collect all media files (Twilio supports up to 10 per message)
+    media_files = []
+    for i in range(min(num_media, 10)):
+        url = request.values.get(f"MediaUrl{i}", "").strip()
+        mtype = request.values.get(f"MediaContentType{i}", "").strip()
+        if url and mtype.startswith("image/"):
+            media_files.append({"url": url, "type": mtype})
+
+    log.info(f"📩 From={from_number} | Body={body!r} | Media={num_media} | Images={len(media_files)}")
 
     response = MessagingResponse()
     msg_obj = response.message()
@@ -2110,13 +2182,13 @@ def whatsapp():
         return str(response)
 
     user_id = user["id"]
-    log_message(user_id, "inbound", body or "[photo]")
+    log_message(user_id, "inbound", body or f"[{len(media_files)} photo(s)]")
 
-    if num_media > 0 and media_url and media_type.startswith("image/"):
+    if media_files:
         if not user.get("onboarding_complete"):
             reply = "👋 Please finish setting up your profile first! Reply *hi* to continue."
         else:
-            reply = handle_photo(media_url, media_type, user)
+            reply = handle_photo(media_files, user)
         msg_obj.body(reply)
         log_message(user_id, "outbound", reply)
         return str(response)
