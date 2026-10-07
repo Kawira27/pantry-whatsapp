@@ -1,5 +1,5 @@
 """
-PantryChef — Translation strings
+Tunapika — Translation strings
 All user-facing text in English and Kiswahili.
 Usage: t("key", lang) or t("key", lang, name="Sally", count=3)
 """
@@ -354,7 +354,7 @@ STRINGS = {
     # ── Privacy ────────────────────────────────────────────────────────────────
     "privacy_info": {
         "en": "🔒 *Your Data & Privacy*\n\n"
-              "Here's what PantryChef stores about you:\n\n"
+              "Here's what Tunapika stores about you:\n\n"
               "• Name: {name}\n"
               "• WhatsApp number (your identifier)\n"
               "• Dietary preferences & allergies\n"
@@ -365,7 +365,7 @@ STRINGS = {
               "To delete all your data reply *confirm delete account*.\n"
               "This is permanent and cannot be undone.",
         "sw": "🔒 *Data Yako na Faragha*\n\n"
-              "Hapa ndipo PantryChef inayohifadhi kuhusu wewe:\n\n"
+              "Hapa ndipo Tunapika inayohifadhi kuhusu wewe:\n\n"
               "• Jina: {name}\n"
               "• Nambari ya WhatsApp (kitambulisho chako)\n"
               "• Mapendeleo ya chakula na mizio\n"

@@ -799,7 +799,8 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
                 "_Tunapika ni msaidizi wa AI na si badala ya ushauri wa kitaalamu "
                 "wa lishe au matibabu. Daima shauriana na daktari au mtaalamu wa "
                 "lishe kwa mahitaji maalum ya kiafya._\n\n"
-                "Je, unakubali Masharti na Vigezo vyetu?\n\n"
+                "Je, unakubali Masharti na Vigezo vyetu?\n"
+                "📄 _https://claude.ai/artifact/BQxxnyoAVXfEM28xbFL18o_\n\n"
                 "1️⃣ Ndiyo, nakubali ✅\n"
                 "2️⃣ Hapana, toka ❌", False
             )
@@ -810,7 +811,8 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
             "_Tunapika is an AI assistant and is not a substitute for professional "
             "nutritional or medical advice. Always consult a qualified nutritionist "
             "or doctor for health-specific dietary needs._\n\n"
-            "Do you accept our Terms & Conditions?\n\n"
+            "Do you accept our Terms & Conditions?\n"
+            "📄 _https://claude.ai/artifact/BQxxnyoAVXfEM28xbFL18o_\n\n"
             "1️⃣ Yes, I accept ✅\n"
             "2️⃣ No, exit ❌", False
         )
