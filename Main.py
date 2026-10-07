@@ -36,18 +36,15 @@ TWILIO_FROM = os.environ.get("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
 
 # ── Security ───────────────────────────────────────────────────────────────────
 
-# Rate limiter: track message timestamps per user in memory
 _rate_store: dict = defaultdict(list)
 _rate_lock = Lock()
-RATE_LIMIT_MAX = 10        # max messages
-RATE_LIMIT_WINDOW = 60     # per 60 seconds
+RATE_LIMIT_MAX = 10
+RATE_LIMIT_WINDOW = 60
 
 def is_rate_limited(phone: str) -> bool:
-    """Return True if user has exceeded rate limit."""
     now = time.time()
     with _rate_lock:
         timestamps = _rate_store[phone]
-        # Remove timestamps outside the window
         timestamps = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
         _rate_store[phone] = timestamps
         if len(timestamps) >= RATE_LIMIT_MAX:
@@ -57,11 +54,6 @@ def is_rate_limited(phone: str) -> bool:
 
 
 def validate_twilio_signature(request) -> bool:
-    """
-    Verify the request genuinely came from Twilio.
-    NOTE: Validation is logged but not enforced until URL format is confirmed.
-    Enable strict mode by setting TWILIO_STRICT_VALIDATION=true in Railway env vars.
-    """
     strict = os.environ.get("TWILIO_STRICT_VALIDATION", "false").lower() == "true"
     if not TWILIO_AUTH_TOKEN:
         log.warning("⚠️ TWILIO_AUTH_TOKEN not set — skipping signature validation")
@@ -73,7 +65,6 @@ def validate_twilio_signature(request) -> bool:
             log.warning("No Twilio signature header")
             return not strict
         params = request.form.to_dict()
-        # Try multiple URL formats Railway might use
         urls_to_try = [
             request.url.replace("http://", "https://"),
             request.url,
@@ -84,19 +75,16 @@ def validate_twilio_signature(request) -> bool:
                 log.info(f"✅ Signature valid with URL: {url}")
                 return True
         log.warning(f"🚨 Signature invalid. Strict={strict}. URL tried: {urls_to_try[0]}")
-        return not strict  # In non-strict mode, log but allow through
+        return not strict
     except Exception as e:
         log.warning(f"Signature validation error: {e}")
         return True
 
 
 def sanitise_input(text: str) -> str:
-    """Strip potentially dangerous characters from user input."""
     if not text:
         return ""
-    # Remove null bytes and control characters (except newlines/tabs)
-    text = re.sub(r"[--]", "", text)
-    # Limit length to prevent abuse
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
     return text[:1000].strip()
 
 CUISINES = [
@@ -104,7 +92,7 @@ CUISINES = [
     "Mexican", "Mediterranean", "American", "International"
 ]
 
-HELP_MSG = """🍳 *PantryChef* — What can I do?
+HELP_MSG = """🍳 *Tunapika* — What can I do?
 
 *Getting recipes:*
 🍽️ *cook* — Suggest a recipe
@@ -139,7 +127,6 @@ REMOVE_SIGNALS = [
 ]
 
 ADD_SIGNALS = [
-    # English - explicit
     "i have", "i also have", "i've got", "i also got", "i got", "i bought",
     "i also bought", "just bought", "just got", "also picked up", "also got",
     "we have", "we also have", "at home", "in my fridge", "in the fridge",
@@ -147,10 +134,8 @@ ADD_SIGNALS = [
     "got some", "went shopping", "from the shop", "from the market",
     "i picked", "purchased", "i also picked", "forgot to mention",
     "also have", "oh and i have", "oh i also",
-    # English - quantity-based (one X, two Y, a packet of)
     "one ", "two ", "three ", "a packet", "a bag", "a bunch", "a loaf",
     "a tin", "a can", "a bottle", "a kilo", "half a", "some ",
-    # Swahili
     "nimenunua", "niko na", "nimepata", "niko nazo", "kuna", "nimebuy",
     "pia niko na", "pia nimenunua", "niko na", "nina ", "tuna ",
     "niliambia", "nimechukua", "nimepata",
@@ -158,43 +143,24 @@ ADD_SIGNALS = [
 
 
 def parse_pantry_intent_local(message: str, known_ingredients: list[str]) -> dict:
-    """
-    Local ingredient extractor — no API key needed.
-    Scans the message for known ingredient names and detects add/remove intent.
-    """
     m = message.lower()
-
-    # Detect intent
     is_remove = any(sig in m for sig in REMOVE_SIGNALS)
     is_add = any(sig in m for sig in ADD_SIGNALS)
-
     if not is_remove and not is_add:
         return {"intent": "none", "ingredients": []}
-
     intent = "remove" if is_remove else "add"
-
-    # Find matching ingredients by scanning message for known names
     found = []
     for ing in known_ingredients:
         ing_lower = ing.lower()
-        # Match whole word / phrase
         if re.search(r'\b' + re.escape(ing_lower) + r'\b', m):
             found.append(ing)
-
     log.info(f"🔍 Local NLU: intent={intent}, found={found}")
     return {"intent": intent, "ingredients": found}
 
 
 def parse_pantry_intent(message: str, known_ingredients: list[str]) -> dict:
-    """
-    Use Claude AI for complex messages, local extraction for simple ones.
-    Returns: {intent: 'add'|'remove'|'none', ingredients: [...]}
-    """
-    # For long messages or when API key available, use Claude directly
     is_complex = len(message.split()) > 8 or "," in message
-    
     if ANTHROPIC_API_KEY and is_complex:
-        # Use Claude for anything complex
         known_str = ", ".join(known_ingredients[:150])
         prompt = f"""You are a smart pantry assistant for a Kenyan cooking app. A user sent this WhatsApp message listing their ingredients:
 
@@ -207,18 +173,7 @@ Known ingredients database: {known_str}
 Rules:
 1. This is clearly an ADD message (user is listing what they have)
 2. Extract every food item mentioned, including spices, condiments, dairy, grains, proteins, vegetables
-3. Match to the closest name in our database (handle variants, quantities, descriptions):
-   - "a crate of eggs" → "eggs"
-   - "a kg of chicken legs" → "chicken legs" 
-   - "half a kg of minced meat" → "minced beef"
-   - "2 buds of garlic" → "garlic"
-   - "raw ginger" → "ginger"
-   - "gharam masala" → "garam masala"
-   - "Spanish paprika" → "paprika"
-   - "vanilla flavored Greek yogurt" → "greek yoghurt"
-   - "wheat flour" → "wheat flour"
-   - "maize flour" → "maize flour"
-   - "green/red/yellow capsicums" → "green capsicum", "red capsicum", "yellow capsicum"
+3. Match to the closest name in our database (handle variants, quantities, descriptions)
 4. Only include items that exist in our database (exact or close match)
 5. Ignore quantities (kg, packets, crates etc)
 
@@ -248,7 +203,6 @@ Respond ONLY with valid JSON:
         except Exception as e:
             log.warning(f"Claude NLU failed: {e}")
 
-    # Fall back to local extraction for simple messages
     return parse_pantry_intent_local(message, known_ingredients)
 
 
@@ -345,36 +299,47 @@ def remove_ingredients(user_id: str, names: list[str]) -> tuple[list[str], list[
     return removed, not_found
 
 
-def format_pantry_update(intent: str, added_or_removed: list[str], not_found: list[str], user_name: str) -> str:
-    action = "added to" if intent == "add" else "removed from"
-    emoji = "✅" if intent == "add" else "🗑️"
+def format_pantry_update(action: str, items: list[str], not_found: list[str], name: str, show_menu: bool = False, lang: str = "en") -> str:
     lines = []
-    if added_or_removed:
-        lines.append(f"{emoji} Got it, {user_name}! I've {action} your pantry:")
-        lines += [f"  • {i}" for i in added_or_removed]
+    if action == "add":
+        real_adds = [i for i in items if "(already" not in i]
+        already = [i for i in items if "(already" in i]
+        if real_adds:
+            lines.append(t("pantry_added_header", lang, count=len(real_adds)))
+            lines += [f"  • {i}" for i in real_adds]
+        if already:
+            lines.append(t("pantry_already_header", lang))
+            lines += [f"  • {i.replace(' (already in pantry)', '')}" for i in already]
+    else:
+        if items:
+            lines.append(t("pantry_removed_header", lang))
+            lines += [f"  • {i}" for i in items]
+
     if not_found:
-        lines.append(f"\n❓ I didn't recognise these:")
+        lines.append(t("pantry_not_found", lang))
         lines += [f"  • {i}" for i in not_found]
-        lines.append("_Try a slightly different spelling._")
-    lines += ["", "Reply *pantry* to see everything you have, or *cook* for a recipe! 🍳"]
+        lines.append(t("pantry_not_found_hint", lang))
+
+    if not lines:
+        return t("pantry_not_found_empty", lang, name=name)
+
+    if show_menu:
+        lines += ["", t("pantry_ready_with_menu", lang, name=name)]
+        lines += ["", main_menu(name, lang)]
+    else:
+        lines += ["", t("pantry_ready_footer", lang)]
     return "\n".join(lines)
 
 
 def find_matching_recipes(pantry_names: list[str], user: dict, meal_type: str = None, max_missing: int = 0) -> list[dict]:
-    """
-    Find recipes matching pantry.
-    max_missing=0: exact matches only
-    max_missing=2: also return near-matches missing up to 2 ingredients
-    Each recipe gets a 'missing' key listing what's needed.
-    """
     query = supabase.table("recipes").select(
         "id, name, description, instructions, cuisine, meal_type, "
         "prep_time_minutes, cook_time_minutes, servings, difficulty, "
         "calories_per_serving, protein_g, carbs_g, fat_g, is_ai_generated, "
+        "avg_rating, rating_count, "
         "recipe_ingredients(ingredients(name))"
     )
     if meal_type:
-        # Include quick meals alongside lunch/dinner
         if meal_type in ("lunch", "dinner"):
             query = query.in_("meal_type", [meal_type, "quick meal"])
         else:
@@ -395,31 +360,25 @@ def find_matching_recipes(pantry_names: list[str], user: dict, meal_type: str = 
                 required.append(ing["name"].lower())
         if not required:
             continue
-        # Allergy check
         if any(a in required for a in allergies):
             continue
-        # Dislike check
         if any(d in recipe["name"].lower() for d in disliked):
             continue
-        # Cuisine check
         recipe_cuisine = (recipe.get("cuisine") or "").lower()
         if preferred_cuisines and not open_to_cuisines:
             if recipe_cuisine not in preferred_cuisines and recipe_cuisine != "kenyan":
                 continue
-        # Ingredient matching
         missing = [i for i in required if i not in pantry_names]
         if len(missing) <= max_missing:
             recipe["missing"] = missing
             recipe["match_score"] = len(required) - len(missing)
             matches.append(recipe)
 
-    # Sort: perfect matches first, then by most ingredients matched
     matches.sort(key=lambda r: (len(r["missing"]), -r["match_score"]))
     return matches
 
 
 def find_near_matches(pantry_names: list[str], user: dict, meal_type: str = None) -> list[dict]:
-    """Return recipes missing 1-2 ingredients, excluding perfect matches."""
     all_matches = find_matching_recipes(pantry_names, user, meal_type, max_missing=2)
     return [r for r in all_matches if len(r.get("missing", [])) > 0]
 
@@ -437,10 +396,7 @@ def get_saved_recipes(user_id: str) -> list[str]:
 def save_recipe_by_name(user_id: str, recipe_name: str, user_name: str = "Friend") -> str:
     res = supabase.table("recipes").select("id, name").ilike("name", f"%{recipe_name.strip()}%").execute()
     if not res.data:
-        return (
-            f"❌ Couldn't find *{recipe_name}*. Try the exact recipe name.\n\n"
-            "_Tip: Copy the recipe name exactly as shown_"
-        )
+        return f"❌ Couldn't find *{recipe_name}*. Try the exact recipe name."
     recipe = res.data[0]
     existing = supabase.table("saved_recipes").select("id").eq("user_id", user_id).eq("recipe_id", recipe["id"]).execute()
     if existing.data:
@@ -474,7 +430,6 @@ def format_recipe(recipe: dict, show_nutrition: bool = True, lang: str = "en") -
     cuisine = recipe.get("cuisine", "")
     meal_type = recipe.get("meal_type", "")
     is_ai = recipe.get("is_ai_generated", False)
-    # Use Swahili name/description if available and user is Swahili
     display_name = (recipe.get("name_sw") or recipe.get("name", "")) if lang == "sw" else recipe.get("name", "")
     display_desc = (recipe.get("description_sw") or recipe.get("description", "")) if lang == "sw" else recipe.get("description", "")
 
@@ -491,7 +446,6 @@ def format_recipe(recipe: dict, show_nutrition: bool = True, lang: str = "en") -
     if tag:
         lines.append(tag)
 
-    # Timing & servings
     timing = []
     if recipe.get("prep_time_minutes"):
         timing.append(f"Prep: {recipe['prep_time_minutes']}min")
@@ -521,14 +475,12 @@ def format_recipe(recipe: dict, show_nutrition: bool = True, lang: str = "en") -
             s = str(s).strip()
             if not s:
                 continue
-            # Remove existing "Step N." or "N." prefix to avoid double numbering
             s = re.sub(r'^Step\s*\d+[\.\:]\s*', '', s, flags=re.IGNORECASE)
             s = re.sub(r'^\d+[\.\:]\s*', '', s)
             if s:
                 lines.append(f"  {n}. {s}")
         lines.append("")
 
-    # Nutrition
     if show_nutrition and recipe.get("calories_per_serving"):
         lines.append("📊 *Nutrition (per serving):*")
         nutrition = []
@@ -549,7 +501,6 @@ def format_recipe(recipe: dict, show_nutrition: bool = True, lang: str = "en") -
 
 
 def format_near_match(recipe: dict, lang: str = "en") -> str:
-    """Format a near-match recipe showing what's missing."""
     missing = recipe.get("missing", [])
     total = recipe.get("match_score", 0) + len(missing)
     return t("near_match_card", lang,
@@ -562,21 +513,20 @@ def format_near_match(recipe: dict, lang: str = "en") -> str:
     )
 
 
-def format_recipe_with_followup(recipe: dict, user_id: str, missing: list = None) -> str:
-    """Format recipe with optional missing ingredient warning, then cooking followup."""
+def format_recipe_with_followup(recipe: dict, user_id: str, missing: list = None, lang: str = "en") -> str:
     lines = []
     if missing:
         lines.append(f"⚠️ *Your pantry is missing:* {', '.join(missing)}")
         lines.append("_You can still try the recipe or grab these on your next shop!_")
         lines.append("")
-    lines.append(format_recipe(recipe))
+    lines.append(format_recipe(recipe, lang=lang))
     update_user(user_id, {
         "last_suggested_recipe_id": str(recipe["id"]),
         "last_suggested_recipe_name": recipe["name"],
         "awaiting_cooking_confirmation": True,
     })
     lines.append("")
-    lines.append(cooking_followup(recipe["name"]))
+    lines.append(cooking_followup(recipe["name"], lang))
     return "\n".join(lines)
 
 
@@ -599,11 +549,9 @@ def generate_meal_plan(user: dict, pantry_names: list[str]) -> str:
     return "\n".join(lines)
 
 
-
-# ── Phase 2: AI Recipe Generation ─────────────────────────────────────────────
+# ── AI Recipe Generation ───────────────────────────────────────────────────────
 
 def generate_ai_recipe(pantry_names: list[str], user: dict, meal_type: str = None) -> dict | None:
-    """Ask Claude to create a recipe from the user's pantry. Saves to DB."""
     if not ANTHROPIC_API_KEY:
         return None
 
@@ -634,7 +582,7 @@ Respond ONLY with valid JSON (no markdown):
 {{
   "name": "Recipe Name",
   "description": "One sentence description",
-  "instructions": "Step 1.\nStep 2.\nStep 3.",
+  "instructions": "Step 1.\\nStep 2.\\nStep 3.",
   "prep_time_minutes": 10,
   "cook_time_minutes": 20,
   "servings": 4,
@@ -668,7 +616,6 @@ Respond ONLY with valid JSON (no markdown):
         data = json.loads(text)
         log.info(f"🤖 AI generated recipe: {data.get('name')}")
 
-        # Save to DB
         insert = supabase.table("recipes").insert({
             "name": data["name"],
             "description": data.get("description", ""),
@@ -692,7 +639,6 @@ Respond ONLY with valid JSON (no markdown):
 
         recipe = insert.data[0]
 
-        # Link ingredients
         for ing_name in data.get("ingredients_used", []):
             ing = find_ingredient_by_name(ing_name)
             if ing:
@@ -704,7 +650,6 @@ Respond ONLY with valid JSON (no markdown):
                 except Exception:
                     pass
 
-        # Reload full recipe with ingredients
         full = supabase.table("recipes").select(
             "id, name, description, instructions, cuisine, meal_type, "
             "prep_time_minutes, cook_time_minutes, servings, difficulty, "
@@ -723,16 +668,14 @@ Respond ONLY with valid JSON (no markdown):
         return None
 
 
-# ── Phase 2: Shopping List ─────────────────────────────────────────────────────
+# ── Shopping List ──────────────────────────────────────────────────────────────
 
 def get_shopping_list(user_id: str) -> dict | None:
-    """Get user's current active shopping list."""
     res = supabase.table("shopping_lists").select("*").eq("user_id", user_id).eq("is_complete", False).order("created_at", desc=True).limit(1).execute()
     return res.data[0] if res.data else None
 
 
 def create_shopping_list(user_id: str, items: list[str], name: str = "Shopping List") -> dict:
-    """Create a new shopping list."""
     res = supabase.table("shopping_lists").insert({
         "user_id": user_id,
         "name": name,
@@ -749,7 +692,6 @@ def format_shopping_list(items: list[str], name: str = "Shopping List", lang: st
 
 
 def shopping_list_for_recipe(recipe_name: str, user_id: str, pantry_names: list[str]) -> str:
-    """Generate shopping list for a specific recipe."""
     res = supabase.table("recipes").select(
         "id, name, recipe_ingredients(ingredients(name))"
     ).ilike("name", f"%{recipe_name.strip()}%").execute()
@@ -772,10 +714,9 @@ def shopping_list_for_recipe(recipe_name: str, user_id: str, pantry_names: list[
     return format_shopping_list(need_to_buy, f"For {recipe['name']}")
 
 
-# ── Phase 2: Nutrition Summary ─────────────────────────────────────────────────
+# ── Nutrition Summary ──────────────────────────────────────────────────────────
 
 def get_nutrition_summary(user_id: str, lang: str = "en") -> str:
-    """Get nutrition summary from recent suggestions."""
     res = (
         supabase.table("user_recipe_suggestions")
         .select("recipes(name, calories_per_serving, protein_g, carbs_g, fat_g)")
@@ -807,17 +748,19 @@ def get_nutrition_summary(user_id: str, lang: str = "en") -> str:
     lines += [f"  • {r['name']}" for r in recipes[:5]]
     return "\n".join(lines)
 
+
 # ── Onboarding ─────────────────────────────────────────────────────────────────
 
 def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
     step = user.get("onboarding_step", 0)
     user_id = user["id"]
-    sw = user.get("language", "en") == "sw"
+    lang = user.get("language", "en")
+    sw = lang == "sw"
 
     if step == 0:
         update_user(user_id, {"onboarding_step": 1})
         return (
-            "👋 Welcome to *PantryChef*! 🍳\n"
+            "👋 Welcome to *Tunapika*! 🍳\n"
             "I help you cook great meals from what you already have.\n\n"
             "First, choose your preferred language:\n\n"
             "1️⃣  🇬🇧 *English*\n"
@@ -829,8 +772,19 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
         lang = "sw" if msg.strip() in ("2", "kiswahili", "swahili") else "en"
         update_user(user_id, {"language": lang, "onboarding_step": 2})
         if lang == "sw":
-            return ("Sawa! 🇰🇪 Tutaendelea kwa Kiswahili.\n\nJina lako ni nani?", False)
-        return ("Great! 🇬🇧 We'll continue in English.\n\nWhat's your name?", False)
+            return (
+                "Sawa! 🇰🇪\n\n"
+                "👋 Habari! Mimi ni *Tunapika* — msaidizi wako wa kupika! 🍳\n\n"
+                "Nitakusaidia kuamua unapike nini kulingana na vitu vilivyo kwenye "
+                "jokofu na pantry yako.\n\n"
+                "Nikuite jina gani? 😊", False
+            )
+        return (
+            "Great! 🇬🇧\n\n"
+            "👋 Hi! *Tunapika* here — your personal AI kitchen assistant! 🍳\n\n"
+            "I'll help you decide what to cook based on what's in your fridge and pantry.\n\n"
+            "What shall I call you? 😊", False
+        )
 
     if step == 2:
         name = msg.strip().title()
@@ -838,36 +792,70 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
         sw = lang == "sw"
         update_user(user_id, {"full_name": name, "onboarding_step": 3})
         if sw:
-            return (f"Karibu, *{name}*! 😊\n\nUna *mzio wowote wa chakula?*\n\nMf. _karanga, maziwa, gluteni, nguruwe_\nAu andika *hapana*.", False)
-        return (f"Nice to meet you, *{name}*! 😊\n\nDo you have any *food allergies or dietary restrictions?*\n\ne.g. _nuts, dairy, gluten, pork_\nOr type *none*.", False)
+            return (
+                f"Karibu, *{name}*! 😊\n\n"
+                "Kabla hatujaanza, tafadhali soma kanusho hili:\n\n"
+                "⚠️ *Kanusho*\n"
+                "_Tunapika ni msaidizi wa AI na si badala ya ushauri wa kitaalamu "
+                "wa lishe au matibabu. Daima shauriana na daktari au mtaalamu wa "
+                "lishe kwa mahitaji maalum ya kiafya._\n\n"
+                "Je, unakubali Masharti na Vigezo vyetu?\n\n"
+                "1️⃣ Ndiyo, nakubali ✅\n"
+                "2️⃣ Hapana, toka ❌", False
+            )
+        return (
+            f"Nice to meet you, *{name}*! 😊\n\n"
+            "Before we get started, please read our disclaimer:\n\n"
+            "⚠️ *Disclaimer*\n"
+            "_Tunapika is an AI assistant and is not a substitute for professional "
+            "nutritional or medical advice. Always consult a qualified nutritionist "
+            "or doctor for health-specific dietary needs._\n\n"
+            "Do you accept our Terms & Conditions?\n\n"
+            "1️⃣ Yes, I accept ✅\n"
+            "2️⃣ No, exit ❌", False
+        )
 
     if step == 3:
+        lang = user.get("language", "en")
+        sw = lang == "sw"
+        m_lower = msg.strip().lower()
+        if m_lower in ("1", "yes", "i accept", "ndiyo", "nakubali", "yes i accept", "accept"):
+            update_user(user_id, {"onboarding_step": 4})
+            if sw:
+                return ("✅ Asante! Sasa tuanze.\n\nUna *mzio wowote wa chakula?*\n\nMf. _karanga, maziwa, gluteni, nguruwe_\nAu andika *hapana*.", False)
+            return ("✅ Great, let's get started!\n\nDo you have any *food allergies or dietary restrictions?*\n\ne.g. _nuts, dairy, gluten, pork_\nOr type *none*.", False)
+        else:
+            if sw:
+                return ("Sawa, hakuna shida! Rudi wakati wowote uko tayari. Kwa heri! 👋", False)
+            return ("No problem! Come back whenever you're ready. Goodbye! 👋", False)
+
+    if step == 4:
         allergies = [] if msg.strip().lower() in ("none", "hapana") else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
-        update_user(user_id, {"allergies": allergies, "onboarding_step": 4})
+        update_user(user_id, {"allergies": allergies, "onboarding_step": 5})
         ack = ("Mzio wako umeandikwa! ✅" if allergies else "Sawa, huna mzio! ✅") if sw else ("Noted your allergies! ✅" if allergies else "Great, no allergies! ✅")
         if sw:
             return (f"{ack}\n\nUnapenda *vyakula au milo gani?* 🥰\n\nMf. _pilau, kuku, pasta, ugali_\nAu andika *ruka*.", False)
         return (f"{ack}\n\nWhat are some *meals or foods you love?* 🥰\n\ne.g. _pilau, chicken, pasta, ugali_\nOr type *skip*.", False)
 
-    if step == 4:
+    if step == 5:
         liked = [] if msg.strip().lower() in ("skip", "ruka") else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
-        update_user(user_id, {"liked_meals": liked, "onboarding_step": 5})
+        update_user(user_id, {"liked_meals": liked, "onboarding_step": 6})
         if sw:
             return ("Vizuri! 😄\n\nKuna *vyakula unavyoepuka?*\n\nMf. _samaki, ini_\nAu andika *hapana*.", False)
         return ("Yum! Great taste 😄\n\nAny *foods or meals you dislike or avoid?*\n\ne.g. _fish, liver_\nOr type *none*.", False)
 
-    if step == 5:
+    if step == 6:
         disliked = [] if msg.strip().lower() in ("none", "hapana") else [a.strip() for a in msg.replace(",", " ").split() if a.strip()]
-        update_user(user_id, {"disliked_meals": disliked, "onboarding_step": 6})
+        update_user(user_id, {"disliked_meals": disliked, "onboarding_step": 7})
         if sw:
             return ("Sawa! 🙅\n\n*Bajeti yako ya chakula kwa wiki?*\n\n1️⃣ *chini* — Chini ya Ksh 1,000\n2️⃣ *kati* — Ksh 1,000–3,000\n3️⃣ *juu* — Ksh 3,000+\n\nJibu *chini*, *kati*, au *juu*.", False)
         return ("Noted! 🙅\n\n*What's your weekly food budget?*\n\n1️⃣ *low* — Under Ksh 1,000\n2️⃣ *medium* — Ksh 1,000–3,000\n3️⃣ *high* — Ksh 3,000+\n\nReply *low*, *medium*, or *high*.", False)
 
-    if step == 6:
+    if step == 7:
         budget = msg.strip().lower()
         if budget not in ("low", "medium", "high"):
             return ("Please reply with *low*, *medium*, or *high* 😊", False)
-        update_user(user_id, {"budget": budget, "onboarding_step": 7})
+        update_user(user_id, {"budget": budget, "onboarding_step": 8})
         cuisine_list = "\n".join([f"{i+1}️⃣ {c}" for i, c in enumerate(CUISINES)])
         return (
             "Got it! 💰\n\n"
@@ -877,10 +865,10 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
             "Or type *no* to stick to Kenyan food only.", False
         )
 
-    if step == 7:
+    if step == 8:
         m = msg.strip().lower()
         if m == "no":
-            update_user(user_id, {"open_to_cuisines": False, "preferred_cuisines": ["Kenyan"], "onboarding_step": 8})
+            update_user(user_id, {"open_to_cuisines": False, "preferred_cuisines": ["Kenyan"], "onboarding_step": 9})
         else:
             selected = []
             for part in m.replace(",", " ").split():
@@ -894,24 +882,24 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
                             selected.append(c)
             if not selected:
                 selected = ["Kenyan"]
-            update_user(user_id, {"open_to_cuisines": True, "preferred_cuisines": selected, "onboarding_step": 8})
+            update_user(user_id, {"open_to_cuisines": True, "preferred_cuisines": selected, "onboarding_step": 9})
         return (
             "Awesome! 🌍\n\n"
-            "Last one — how do you prefer to cook?\n\n"
+            "How do you prefer to cook?\n\n"
             "1️⃣ *daily* — I cook fresh every day\n"
             "2️⃣ *meal prep* — I prep meals once a week\n\n"
             "Reply *daily* or *meal prep*.", False
         )
 
-    if step == 8:
+    if step == 9:
         m = msg.strip().lower()
         style = "meal_prep" if "meal" in m or "prep" in m or m == "2" else "daily"
-        update_user(user_id, {"cooking_style": style, "onboarding_step": 9})
+        update_user(user_id, {"cooking_style": style, "onboarding_step": 10})
         if sw:
             return ("Vizuri! 🍳\n\nUna watu wangapi nyumbani wanaokula pamoja?\n\ne.g. _1, 2, 4_\nAu andika *ruka*.", False)
         return ("Got it! 🍳\n\nHow many people do you cook for at home?\n\ne.g. _1, 2, 4_\nOr type *skip*.", False)
 
-    if step == 9:
+    if step == 10:
         m = msg.strip().lower()
         household_size = None
         if m not in ("skip", "ruka"):
@@ -919,43 +907,43 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
                 household_size = int(m.split()[0])
             except Exception:
                 pass
-        update_user(user_id, {"household_size": household_size, "onboarding_step": 10})
+        update_user(user_id, {"household_size": household_size, "onboarding_step": 11})
         if sw:
             return ("Sawa! 👨‍👩‍👧\n\nUnaishi wapi? (Mji au kaunti)\n\nMf. _Nairobi, Mombasa, Kisumu_\nAu andika *ruka*.", False)
         return ("Got it! 👨‍👩‍👧\n\nWhich city or region are you in?\n\ne.g. _Nairobi, Mombasa, Kisumu, London_\nOr type *skip*.", False)
 
-    if step == 10:
+    if step == 11:
         m = msg.strip()
         region = None if m.lower() in ("skip", "ruka") else m.title()
-        update_user(user_id, {"region": region, "onboarding_step": 11})
+        update_user(user_id, {"region": region, "onboarding_step": 12})
         if sw:
             return ("📍 Sawa!\n\nUna ujuzi gani wa kupika?\n\n1️⃣ *Mwanzo* — Ninajifunza\n2️⃣ *Kati* — Najua mambo ya msingi\n3️⃣ *Uzoefu* — Napika vizuri\n\nJibu *1*, *2* au *3*.", False)
         return ("📍 Got it!\n\nHow would you rate your cooking skills?\n\n1️⃣ *Beginner* — Still learning\n2️⃣ *Intermediate* — Know the basics\n3️⃣ *Advanced* — Confident cook\n\nReply *1*, *2* or *3*.", False)
 
-    if step == 11:
+    if step == 12:
         m = msg.strip().lower()
         skill_map = {"1": "beginner", "beginner": "beginner", "mwanzo": "beginner",
                      "2": "intermediate", "intermediate": "intermediate", "kati": "intermediate",
                      "3": "advanced", "advanced": "advanced", "uzoefu": "advanced"}
         skill = skill_map.get(m, "intermediate")
-        update_user(user_id, {"cooking_skill": skill, "onboarding_step": 12})
+        update_user(user_id, {"cooking_skill": skill, "onboarding_step": 13})
         if sw:
             return ("👨‍🍳 Vizuri!\n\nUnapenda chakula chenye kiwango gani cha utiaji?\n\n1️⃣ *Kidogo* — Sipendi pilipili\n2️⃣ *Wastani* — Kidogo kidogo\n3️⃣ *Ukali* — Napenda moto\n4️⃣ *Ukali sana* — Kadri iwezekanavyo!\n\nJibu *1*–*4*.", False)
         return ("👨‍🍳 Great!\n\nHow much spice do you like in your food?\n\n1️⃣ *Mild* — No heat please\n2️⃣ *Medium* — A little warmth\n3️⃣ *Hot* — I like it spicy\n4️⃣ *Very hot* — The hotter the better!\n\nReply *1*–*4*.", False)
 
-    if step == 12:
+    if step == 13:
         m = msg.strip().lower()
         spice_map = {"1": "mild", "mild": "mild", "kidogo": "mild",
                      "2": "medium", "medium": "medium", "wastani": "medium",
                      "3": "hot", "hot": "hot", "ukali": "hot",
                      "4": "very hot", "very hot": "very hot", "ukali sana": "very hot"}
         spice = spice_map.get(m, "medium")
-        update_user(user_id, {"spice_tolerance": spice, "onboarding_step": 13})
+        update_user(user_id, {"spice_tolerance": spice, "onboarding_step": 14})
         if sw:
             return ("🌶️ Sawa!\n\nUna malengo gani ya kiafya? (Chagua moja au zaidi)\n\n1️⃣ Kupunguza uzito\n2️⃣ Kuongeza misuli\n3️⃣ Chakula bora na uwiano\n4️⃣ Udhibiti wa ugonjwa (kisukari, shinikizo la damu n.k)\n5️⃣ Hakuna — Napenda tu kula vizuri\n\nJibu kwa nambari e.g. _1, 3_ au *ruka*.", False)
         return ("🌶️ Perfect!\n\nDo you have any health goals? (Choose one or more)\n\n1️⃣ Weight loss\n2️⃣ Muscle gain\n3️⃣ Balanced / healthy eating\n4️⃣ Managing a condition (diabetes, hypertension etc.)\n5️⃣ None — I just want to eat well\n\nReply with numbers e.g. _1, 3_ or *skip*.", False)
 
-    if step == 13:
+    if step == 14:
         m = msg.strip().lower()
         goal_map = {
             "1": "weight_loss", "2": "muscle_gain", "3": "balanced",
@@ -971,12 +959,12 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
                 g = goal_map.get(part.strip())
                 if g and g != "none":
                     health_goals.append(g)
-        update_user(user_id, {"health_goals": health_goals or [], "onboarding_step": 14})
+        update_user(user_id, {"health_goals": health_goals or [], "onboarding_step": 15})
         if sw:
             return ("💪 Vizuri!\n\nSwali la mwisho kabisa — na ni la hiari:\n\nMshahara wako huja lini kwa kawaida? Hii inakusaidia kupata mapendekezo ya chakula cha bei nafuu mwishoni mwa mwezi.\n\ne.g. _25_ au _1_\nAu andika *ruka* — sawa kabisa!", False)
         return ("💪 Almost done!\n\nOne last question — completely optional:\n\nWhat day of the month does your salary usually arrive? This helps me suggest budget-friendly meals when funds are low.\n\ne.g. _25_ or _1_\nOr type *skip* — totally fine!", False)
 
-    if step == 14:
+    if step == 15:
         m = msg.strip().lower()
         payday = None
         if m not in ("skip", "ruka"):
@@ -991,7 +979,7 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
         update_user(user_id, {
             "payday": payday,
             "onboarding_complete": True,
-            "onboarding_step": 15,
+            "onboarding_step": 16,
             "awaiting_meal_type": False,
             "awaiting_pantry_action": False,
             "awaiting_profile_action": False,
@@ -1022,9 +1010,139 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
     return (HELP_MSG, True)
 
 
+# ── Conversation helpers ──────────────────────────────────────────────────────
+
+def conversation_closer(name: str, lang: str = "en", prefix: str = "") -> str:
+    """Warm conversation ender — shown after rating or 'not yet'."""
+    if lang == "sw":
+        closer = (
+            f"{'%s\n\n' % prefix if prefix else ''}"
+            f"Hiyo inatosha kwa sasa, *{name}*! 🍳\n"
+            "Rudi unapohisi njaa tena 😊\n\n"
+            "_Andika *hi* wakati wowote_ 👋"
+        )
+    else:
+        closer = (
+            f"{'%s\n\n' % prefix if prefix else ''}"
+            f"That's it from me for now, *{name}*! 🍳\n"
+            "Come back when you're hungry again 😊\n\n"
+            "_Reply *hi* anytime_ 👋"
+        )
+    return closer
+
+
+def handle_reentry(user: dict, msg: str) -> str:
+    """
+    Smart re-entry handler — detects where the user left off and
+    resumes or greets accordingly.
+    """
+    name = user.get("full_name", "Friend")
+    lang = user.get("language", "en")
+    sw = lang == "sw"
+
+    # ── Mid-onboarding: dropped off during setup ──────────────────────────────
+    if not user.get("onboarding_complete"):
+        step = user.get("onboarding_step", 0)
+        if step > 0:
+            if sw:
+                return (
+                    f"Karibu tena, *{name}*! 👋\n\n"
+                    f"Tulikuwa tukiendelea na usanidi wako (hatua {step}/15).\n"
+                    "Tuendelee? Jibu chochote kuendelea."
+                )
+            return (
+                f"Welcome back, *{name}*! 👋\n\n"
+                f"We were in the middle of your setup (step {step}/15).\n"
+                "Just reply anything to continue where you left off."
+            )
+        # Brand new — let onboarding handle it
+        return None  # caller falls through to normal onboarding
+
+    # ── Mid-cooking flow: was shown recipes but never picked one ─────────────
+    pending_options = user.get("pending_recipe_options")
+    if pending_options:
+        try:
+            import json as _json
+            option_ids = _json.loads(pending_options)
+            if option_ids:
+                if sw:
+                    return (
+                        f"Karibu tena, *{name}*! 👋\n\n"
+                        "Inaonekana uliondoka ukiwa na mapishi fulani uliyopewa — \n"
+                        "bado unaweza kuchagua nambari, au andika *cook* kuanza upya."
+                    )
+                return (
+                    f"Welcome back, *{name}*! 👋\n\n"
+                    "Looks like you left with some recipe options on the table — \n"
+                    "you can still pick a number, or type *cook* to start fresh."
+                )
+        except Exception:
+            pass
+
+    # ── Mid-confirmation: got a recipe, never confirmed if they cooked it ─────
+    if user.get("awaiting_cooking_confirmation"):
+        recipe_name = user.get("last_suggested_recipe_name", "your recipe")
+        if sw:
+            return (
+                f"Karibu tena, *{name}*! 👋\n\n"
+                f"Je, ulimaliza kupika *{recipe_name}*?\n\n"
+                "1️⃣  ✅ *Ndiyo, nilipika*\n"
+                "2️⃣  🥕 *Nilitumia baadhi ya viungo*\n"
+                "3️⃣  ❌ *Bado sijakipika*"
+            )
+        return (
+            f"Welcome back, *{name}*! 👋\n\n"
+            f"Did you ever get around to cooking *{recipe_name}*?\n\n"
+            "1️⃣  ✅ *Yes, I cooked it*\n"
+            "2️⃣  🥕 *Used some ingredients*\n"
+            "3️⃣  ❌ *Never got around to it*"
+        )
+
+    # ── Normal return: completed user, no pending state ───────────────────────
+    last_recipe = user.get("last_suggested_recipe_name")
+
+    # Time-aware greeting
+    from datetime import datetime
+    import pytz
+    try:
+        tz = pytz.timezone("Africa/Nairobi")
+        hour = datetime.now(tz).hour
+    except Exception:
+        hour = 12  # fallback if pytz not available
+
+    if hour < 12:
+        time_emoji = "🌅"
+        time_greeting = "Habari za asubuhi" if sw else "Good morning"
+    elif hour < 17:
+        time_emoji = "☀️"
+        time_greeting = "Habari za mchana" if sw else "Good afternoon"
+    else:
+        time_emoji = "🌙"
+        time_greeting = "Habari za jioni" if sw else "Good evening"
+
+    if last_recipe and sw:
+        opener = (
+            f"{time_emoji} {time_greeting}, *{name}*! 👋\n\n"
+            f"Mara ya mwisho ulikuwa ukipika *{last_recipe}* — "
+            f"ilikuwa ladha? 😄\n\n"
+        )
+    elif last_recipe:
+        opener = (
+            f"{time_emoji} {time_greeting}, *{name}*! 👋\n\n"
+            f"Last time you were making *{last_recipe}* — "
+            f"hope it turned out great! 😄\n\n"
+        )
+    else:
+        if sw:
+            opener = f"{time_emoji} {time_greeting}, *{name}*! 👋\n\nTunapika nini leo?\n\n"
+        else:
+            opener = f"{time_emoji} {time_greeting}, *{name}*! 👋\n\nWhat are we cooking today?\n\n"
+
+    return opener + main_menu(name, lang)
+
+
 # ── Intent router ──────────────────────────────────────────────────────────────
 
-# Keywords that are clearly NOT pantry-related (avoid false NLU calls)
 RECIPE_KEYWORDS = ["cook", "recipe", "hungry", "what are we", "breakfast", "lunch",
                    "dinner", "meal prep", "weekly plan", "supper",
                    "morning", "evening", "brunch", "snack"]
@@ -1034,16 +1152,13 @@ EXPLICIT_COMMANDS = ["help", "menu", "start", "hi", "hello", "hey", "pantry",
 
 
 def looks_like_pantry_message(msg: str) -> bool:
-    """Heuristic: does this message sound like it's about having/getting/using ingredients?"""
     m = msg.lower()
     pantry_signals = [
-        # Adding
         "i have", "i've got", "i got", "i bought", "just bought", "just got",
         "we have", "at home", "in my fridge", "in the fridge", "in my kitchen",
         "i picked up", "picked up some", "i found", "there's some", "got some",
         "went shopping", "from the shop", "from the market", "nimenunua", "niko na",
         "nimepata", "niko nazo", "kuna", "nimebuy",
-        # Removing
         "i used", "i finished", "ran out", "used up", "no more", "finished the",
         "i don't have", "i do not have", "out of", "imekwisha", "nimemaliza",
         "hakuna", "nimetumia", "imeisha",
@@ -1051,51 +1166,18 @@ def looks_like_pantry_message(msg: str) -> bool:
     return any(signal in m for signal in pantry_signals)
 
 
-def format_pantry_update(action: str, items: list[str], not_found: list[str], name: str, show_menu: bool = False, lang: str = "en") -> str:
-    """Format a friendly pantry update confirmation."""
-    lines = []
-    if action == "add":
-        real_adds = [i for i in items if "(already" not in i]
-        already = [i for i in items if "(already" in i]
-        if real_adds:
-            lines.append(t("pantry_added_header", lang, count=len(real_adds)))
-            lines += [f"  • {i}" for i in real_adds]
-        if already:
-            lines.append(t("pantry_already_header", lang))
-            lines += [f"  • {i.replace(' (already in pantry)', '')}" for i in already]
-    else:
-        if items:
-            lines.append(t("pantry_removed_header", lang))
-            lines += [f"  • {i}" for i in items]
-
-    if not_found:
-        lines.append(t("pantry_not_found", lang))
-        lines += [f"  • {i}" for i in not_found]
-        lines.append(t("pantry_not_found_hint", lang))
-
-    if not lines:
-        return t("pantry_not_found_empty", lang, name=name)
-
-    if show_menu:
-        lines += ["", t("pantry_ready_with_menu", lang, name=name)]
-        lines += ["", main_menu(name, lang)]
-    else:
-        lines += ["", t("pantry_ready_footer", lang)]
-    return "\n".join(lines)
-
-
 def route(msg: str, user: dict) -> str:
     user_id = user["id"]
     m = msg.strip().lower()
     name = user.get("full_name", "Friend")
-    meal_type = None  # Initialize here — set by meal type handler or direct text commands
+    lang = user.get("language", "en")
+    meal_type = None
 
-    # Confirmation trigger sets — defined early so all handlers can use them
     COOK_CONFIRM_TRIGGERS = {"yes, i cooked it", "yes i cooked it", "yes", "1", "cooked", "i cooked it", "ndiyo", "nimepika"}
     COOK_DENY_TRIGGERS = {"no", "not yet", "3", "hapana", "bado"}
     COOK_SOME_TRIGGERS = {"used some", "used some ingredients", "2", "some", "baadhi"}
 
-    # COOKING CONFIRMATION — must come before recipe selection to intercept 1/2/3
+    # COOKING CONFIRMATION
     if user.get("awaiting_cooking_confirmation"):
         recipe_name = user.get("last_suggested_recipe_name", "that recipe")
         recipe_id = user.get("last_suggested_recipe_id")
@@ -1128,9 +1210,8 @@ def route(msg: str, user: dict) -> str:
             return t("used_some", lang)
         elif m in COOK_DENY_TRIGGERS:
             update_user(user_id, {"awaiting_cooking_confirmation": False})
-            return f"👍 No problem! Your pantry stays as is.\n\n" + main_menu(name, user.get('language', 'en'))
+            return conversation_closer(name, lang, prefix="👍 No problem! Your pantry is saved.")
         else:
-            # Unknown reply while awaiting confirmation — re-prompt
             return (
                 f"Did you end up cooking *{recipe_name}*? 👨‍🍳\n\n"
                 "1️⃣  ✅ *Yes, I cooked it* — remove ingredients from pantry\n"
@@ -1147,13 +1228,11 @@ def route(msg: str, user: dict) -> str:
             rating = int(m)
             stars = "⭐" * rating
             try:
-                # Upsert rating
                 supabase.table("recipe_ratings").upsert({
                     "user_id": user_id,
                     "recipe_id": recipe_id,
                     "rating": rating,
                 }).execute()
-                # Update avg_rating on recipe
                 avg_res = supabase.table("recipe_ratings").select("rating").eq("recipe_id", recipe_id).execute()
                 if avg_res.data:
                     ratings = [r["rating"] for r in avg_res.data]
@@ -1171,10 +1250,10 @@ def route(msg: str, user: dict) -> str:
                 4: f"Great to hear you enjoyed it! {stars} 🎉",
                 5: f"Amazing! So glad you loved *{recipe_name}*! {stars} 🎉🎉",
             }
-            return messages.get(rating, "Thanks for rating!") + "\n\n" + main_menu(name, user.get('language', 'en'))
-        return "No worries! " + main_menu(name, user.get('language', 'en'))
+            return messages.get(rating, "Thanks for rating!") + "\n\n" + conversation_closer(name, lang)
+        return "No worries! " + conversation_closer(name, lang)
 
-    # RECIPE SELECTION (after being shown options)
+    # RECIPE SELECTION
     pending_options = user.get("pending_recipe_options")
     if pending_options and m.strip() in ("1", "2", "3", "4", "5"):
         try:
@@ -1192,7 +1271,6 @@ def route(msg: str, user: dict) -> str:
                 if res.data:
                     recipe = res.data[0]
                     update_user(user_id, {"pending_recipe_options": None})
-                    # Check what user is missing
                     pantry = get_pantry_names(user_id)
                     all_ings = [
                         ri["ingredients"]["name"]
@@ -1206,12 +1284,12 @@ def route(msg: str, user: dict) -> str:
                         }).execute()
                     except Exception:
                         pass
-                    return format_recipe_with_followup(recipe, user_id, missing=missing)
+                    return format_recipe_with_followup(recipe, user_id, missing=missing, lang=lang)
         except Exception as e:
             log.warning(f"Recipe selection error: {e}")
         update_user(user_id, {"pending_recipe_options": None})
 
-    # CHEF CHAT HANDLER — natural language recipe requests
+    # CHEF CHAT HANDLER
     if user.get("awaiting_chef_chat") or any(p in m for p in [
         "vegan", "vegetarian", "meat", "chicken only", "beef only",
         "quick", "under 20", "under 30", "fast", "easy", "simple",
@@ -1229,7 +1307,6 @@ def route(msg: str, user: dict) -> str:
             if not pantry:
                 return t("pantry_empty", lang, name=name)
 
-            # Use Claude to interpret the request and filter recipes
             if ANTHROPIC_API_KEY:
                 all_recipes = supabase.table("recipes").select(
                     "id, name, description, cuisine, meal_type, "
@@ -1238,7 +1315,6 @@ def route(msg: str, user: dict) -> str:
                     "recipe_ingredients(ingredients(name))"
                 ).execute().data or []
 
-                # Filter to recipes user can make (has at least 50% ingredients)
                 candidate_recipes = []
                 for r in all_recipes:
                     r_ings = [ri["ingredients"]["name"].lower()
@@ -1287,7 +1363,6 @@ Return ONLY valid JSON:
                     suggested_names = chef_result.get("recipes", [])
                     chef_message = chef_result.get("message", "Here are my picks for you!")
 
-                    # Find matching recipe objects
                     shown = []
                     for rname in suggested_names:
                         for r in candidate_recipes:
@@ -1311,7 +1386,6 @@ Return ONLY valid JSON:
                 except Exception as e:
                     log.warning(f"Chef chat AI failed: {e}")
 
-            # Fallback — show regular recipe suggestions
             matches = find_matching_recipes(pantry, user)
             if matches:
                 shown = matches[:5]
@@ -1326,17 +1400,14 @@ Return ONLY valid JSON:
 
             return t("no_recipe_match", lang, name=name)
 
-    # MEAL TYPE SELECTION (when user was shown the cook menu)
+    # MEAL TYPE SELECTION
     awaiting_meal = user.get("awaiting_meal_type", False)
     if awaiting_meal:
         update_user(user_id, {"awaiting_meal_type": False})
-        lang = user.get("language", "en")
 
-        # Handle back to menu
         if m in ("8", "back", "back to menu", "rudi", "menu"):
             return main_menu(name, lang)
 
-        # Handle chat with chef
         if m in ("7", "chat with chef", "zungumza na mpishi", "chef"):
             update_user(user_id, {"awaiting_chef_chat": True})
             if lang == "sw":
@@ -1359,7 +1430,6 @@ Return ONLY valid JSON:
                 "💬 _'I have chicken and tomatoes, what can I make?'_"
             )
 
-        # Handle saved recipes
         if m in ("6", "saved recipes", "saved", "mapishi yangu"):
             saved = get_saved_recipes(user_id)
             if not saved:
@@ -1369,9 +1439,8 @@ Return ONLY valid JSON:
             lines += ["", "Reply *cook* for a new suggestion!"]
             return "\n".join(lines)
 
-        # Handle surprise me
         if m in ("5", "surprise me", "surprise", "chochote"):
-            meal_type = None  # any meal type — falls through below
+            meal_type = None
 
         meal_type_map = {
             "1": "breakfast", "1️⃣": "breakfast",
@@ -1385,10 +1454,8 @@ Return ONLY valid JSON:
         }
         if m.lower() in meal_type_map:
             meal_type = meal_type_map[m.lower()]
-        # Falls through to recipe suggestion below with meal_type set
 
-    # NUMBERED MENU SHORTCUTS (only when NOT in cook/pantry/profile submenu)
-    lang = user.get("language", "en")
+    # NUMBERED MENU SHORTCUTS
     if not pending_options and not awaiting_meal and not user.get("awaiting_pantry_action") and not user.get("awaiting_profile_action"):
         if m.strip() in ("1", "1️⃣"):
             m = "cook"
@@ -1465,7 +1532,7 @@ Return ONLY valid JSON:
             reply, _ = handle_onboarding({**user, "onboarding_complete": False, "onboarding_step": 0}, m)
             return reply
         elif m in ("3", "nutrition", "lishe", "macros", "calories"):
-            return get_nutrition_summary(user_id)
+            return get_nutrition_summary(user_id, lang)
         elif m in ("4", "saved recipes", "saved", "mapishi yangu", "favourites"):
             saved = get_saved_recipes(user_id)
             if not saved:
@@ -1492,7 +1559,6 @@ Return ONLY valid JSON:
         except Exception:
             found = []
 
-        # Parse skips: "yes but skip the milk and bread"
         skip = []
         if "skip" in m:
             skip_part = m.split("skip", 1)[1]
@@ -1503,10 +1569,9 @@ Return ONLY valid JSON:
         added, not_found = add_ingredients(user_id, found)
         return format_pantry_update("add", added, not_found, name)
 
-    # HELP / HI
+    # HELP / HI — contextual re-entry
     if m in ("help", "menu", "start", "hi", "hello", "hey", "msaada", "habari"):
-        lang = user.get("language", "en")
-        return main_menu(name, lang)
+        return handle_reentry(user, m)
 
     # PROFILE VIEW
     if m in ("profile", "my profile", "settings"):
@@ -1534,12 +1599,12 @@ Return ONLY valid JSON:
         reply, _ = handle_onboarding({**user, "onboarding_step": 0}, msg)
         return reply
 
-    # PANTRY COMMAND — show submenu
+    # PANTRY COMMAND
     if m in ("pantry", "ingredients", "my pantry", "my ingredients", "🧺"):
         update_user(user_id, {"awaiting_pantry_action": True})
         return pantry_menu(name, lang)
 
-    # PROFILE COMMAND — show submenu
+    # PROFILE COMMAND
     if m in ("profile", "my profile", "settings", "wasifu", "👤"):
         update_user(user_id, {"awaiting_profile_action": True})
         return profile_menu(name, lang)
@@ -1587,8 +1652,7 @@ Return ONLY valid JSON:
         lines += ["", "Reply *cook* for a new suggestion!"]
         return "\n".join(lines)
 
-    # RECIPE / MEAL TYPE REQUESTS (from direct text like "breakfast", "dinner" etc)
-    # Note: meal_type may already be set by the meal type selection handler above
+    # RECIPE / MEAL TYPE from direct text
     if meal_type is None:
         if any(w in m for w in ["breakfast", "morning", "brunch"]):
             meal_type = "breakfast"
@@ -1599,7 +1663,7 @@ Return ONLY valid JSON:
         elif "snack" in m:
             meal_type = "snack"
 
-    # "create recipe" and "generate recipe" must be handled BEFORE cook menu trigger
+    # CREATE RECIPE (before cook trigger)
     if any(p in m for p in ["create recipe", "generate recipe", "make me a recipe", "invent a recipe", "tengeneza recipe", "unda mapishi"]):
         pantry = get_pantry_names(user_id)
         if not pantry:
@@ -1613,8 +1677,6 @@ Return ONLY valid JSON:
 
     if any(p in m.split() for p in ["cook", "hungry", "food", "eat"]) or \
        any(p in m for p in ["what are we", "what's cooking", "whats cooking", "nini tunachopika"]) and not meal_type:
-        # Show cook submenu
-        lang = user.get("language", "en")
         update_user(user_id, {"awaiting_meal_type": True})
         if lang == "sw":
             return (
@@ -1642,7 +1704,7 @@ Return ONLY valid JSON:
 
     if meal_type or m in ("5", "surprise me", "surprise", "chochote"):
         if m in ("5", "surprise me", "surprise", "chochote"):
-            meal_type = None  # any meal type
+            meal_type = None
         pantry = get_pantry_names(user_id)
         if not pantry:
             return (
@@ -1651,15 +1713,12 @@ Return ONLY valid JSON:
                 "_\"I have eggs, rice and some tomatoes\"_"
             )
 
-        # Perfect matches — ranked by rating then ingredient count
         matches = find_matching_recipes(pantry, user, meal_type=meal_type)
         matches.sort(key=lambda r: (-(r.get("avg_rating") or 0), -r.get("match_score", 0)))
 
-        # Near-matches missing 1-2 ingredients
         near = find_near_matches(pantry, user, meal_type=meal_type)
         near.sort(key=lambda r: (len(r.get("missing", [])), -(r.get("avg_rating") or 0)))
 
-        # Combine: perfect matches first, then near-matches, max 5 total
         all_options = []
         for r in matches:
             r["is_perfect"] = True
@@ -1671,7 +1730,6 @@ Return ONLY valid JSON:
             all_options.append(r)
 
         if all_options:
-            # Pick up to 5, store for selection
             shown = all_options[:5]
             option_ids = [str(r["id"]) for r in shown]
             update_user(user_id, {"pending_recipe_options": json.dumps(option_ids)})
@@ -1711,7 +1769,6 @@ Return ONLY valid JSON:
                 lines.append("✨ Or *create recipe* for a custom AI one!")
             return "\n".join(lines)
 
-        # AI recipe generation as last resort
         if ANTHROPIC_API_KEY:
             ai_recipe = generate_ai_recipe(pantry, user, meal_type)
             if ai_recipe:
@@ -1726,27 +1783,23 @@ Return ONLY valid JSON:
                     }).execute()
                 except Exception:
                     pass
-                return "✨ *I created a recipe just for you!*\n\n" + format_recipe_with_followup(ai_recipe, user_id)
+                return "✨ *I created a recipe just for you!*\n\n" + format_recipe_with_followup(ai_recipe, user_id, lang=lang)
 
         return (
             f"🤔 I couldn't find anything matching your pantry right now, {name}.\n\n"
             "What else do you have at home? Just tell me naturally!"
         )
 
-    # ── NATURAL LANGUAGE PANTRY DETECTION ──────────────────────────────────────
-    # Long comma-separated messages OR pantry signal words = pantry message
+    # NATURAL LANGUAGE PANTRY DETECTION
     is_pantry_msg = looks_like_pantry_message(m) or (
         "," in msg and len(msg.split(",")) > 3 and
         not any(k in m for k in RECIPE_KEYWORDS + EXPLICIT_COMMANDS)
     )
 
-    # Handle skip during initial pantry setup
     if m in ("skip", "ruka", "later", "baadaye"):
-        lang = user.get("language", "en")
         return main_menu(name, lang)
 
     if is_pantry_msg:
-        # Pantry messages always take priority — clear any pending menu state
         if user.get("awaiting_meal_type") or user.get("awaiting_pantry_action"):
             update_user(user_id, {
                 "awaiting_meal_type": False,
@@ -1756,25 +1809,23 @@ Return ONLY valid JSON:
         result = parse_pantry_intent(msg, all_ingredients)
         intent = result.get("intent", "none")
         ingredients = result.get("ingredients", [])
-        lang = user.get("language", "en")
 
         if intent == "add" and ingredients:
             added, not_found = add_ingredients(user_id, ingredients)
-            # Check if this is the first pantry add (show main menu after)
             pantry_count = len(get_user_pantry(user_id))
-            show_menu = pantry_count <= len(added)  # first time adding
+            show_menu = pantry_count <= len(added)
             return format_pantry_update("add", added, not_found, name, show_menu=show_menu, lang=lang)
 
         if intent == "remove" and ingredients:
             removed, not_found = remove_ingredients(user_id, ingredients)
-            return format_pantry_update("remove", removed, not_found, name)
+            return format_pantry_update("remove", removed, not_found, name, lang=lang)
 
     # PRIVACY & DATA COMMANDS
     if m in ("my data", "privacy", "delete my account", "delete account", "futa akaunti", "data yangu"):
         allergies = ", ".join(user.get("allergies") or []) or "None"
         return (
             f"🔒 *Your Data & Privacy*\n\n"
-            f"Here's what PantryChef stores about you:\n\n"
+            f"Here's what Tunapika stores about you:\n\n"
             f"• Name: {name}\n"
             f"• WhatsApp number (your identifier)\n"
             f"• Dietary preferences & allergies: {allergies}\n"
@@ -1788,7 +1839,6 @@ Return ONLY valid JSON:
 
     if m in ("confirm delete account", "thibitisha kufuta"):
         try:
-            # Delete all user data
             supabase.table("user_pantry_items").delete().eq("user_id", user_id).execute()
             supabase.table("saved_recipes").delete().eq("user_id", user_id).execute()
             supabase.table("recipe_ratings").delete().eq("user_id", user_id).execute()
@@ -1805,18 +1855,6 @@ Return ONLY valid JSON:
         except Exception as e:
             log.error(f"Delete account failed: {e}")
             return "❌ Something went wrong deleting your account. Please try again or contact support."
-
-    # CREATE AI RECIPE
-    if any(p in m for p in ["create recipe", "make me a recipe", "generate recipe", "invent", "tengeneza recipe", "create a recipe"]):
-        pantry = get_pantry_names(user_id)
-        if not pantry:
-            return f"😅 Your pantry is empty! Tell me what you have at home first, {name}."
-        if not ANTHROPIC_API_KEY:
-            return "✨ AI recipe creation isn't available right now. Reply *cook* for existing recipes!"
-        ai_recipe = generate_ai_recipe(pantry, user, meal_type)
-        if ai_recipe:
-            return "✨ *I created a recipe just for you!*\n\n" + format_recipe_with_followup(ai_recipe, user_id)
-        return t("ai_recipe_fail", lang)
 
     # SHOPPING LIST
     if "shopping list" in m or m == "shopping":
@@ -1850,21 +1888,11 @@ Return ONLY valid JSON:
         lines += ["\nReply *cook* to see what you can make now! 🍳"]
         return "\n".join(lines)
 
-    # CREATE AI RECIPE
-    if any(p in m for p in ["create recipe", "make me a recipe", "generate recipe", "invent a recipe", "tengeneza recipe"]):
-        pantry = get_pantry_names(user_id)
-        if not pantry:
-            return "😅 Your pantry is empty! Add some ingredients first."
-        ai_recipe = generate_ai_recipe(pantry, user, meal_type)
-        if ai_recipe:
-            return "✨ *I created a recipe just for you!*\n\n" + format_recipe_with_followup(ai_recipe, user_id)
-        return t("ai_recipe_fail", lang)
-
     # NUTRITION
     if any(p in m for p in ["nutrition", "calories", "macros", "health stats", "lishe"]):
-        return get_nutrition_summary(user_id)
+        return get_nutrition_summary(user_id, lang)
 
-    # DEFAULT fallback
+    # DEFAULT FALLBACK
     return (
         f"🤔 I didn't quite get that, {name}.\n\n"
         "You can tell me things like:\n"
@@ -1875,13 +1903,10 @@ Return ONLY valid JSON:
     )
 
 
-
 # ── Photo analysis ─────────────────────────────────────────────────────────────
 
 def fetch_image_as_base64(url: str, media_type: str) -> str | None:
-    """Download image from Twilio and encode as base64."""
     try:
-        import base64
         twilio_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
         twilio_token = os.environ.get("TWILIO_AUTH_TOKEN", "")
         auth = (twilio_sid, twilio_token) if twilio_sid and twilio_token else None
@@ -1896,7 +1921,6 @@ def fetch_image_as_base64(url: str, media_type: str) -> str | None:
 
 
 def analyse_photo_with_claude(image_b64: str, media_type: str, known_ingredients: list[str]) -> dict:
-    """Send image to Claude Vision. Returns {ingredients_found, image_type}"""
     if not ANTHROPIC_API_KEY:
         return {"ingredients_found": [], "image_type": "other"}
 
@@ -1908,26 +1932,13 @@ Your job: extract ALL food ingredients visible in the image.
 Image type:
 - "receipt" = shopping receipt, till slip, or written shopping list
 - "fridge" = fridge, freezer, pantry shelf, spice drawer, kitchen counter with food, ANY place where food/ingredients are stored or displayed
-- "other" = clearly not food related (e.g. a selfie, outdoor scene, document)
-
-IMPORTANT: Be very generous — spice drawers, spice racks, kitchen shelves, countertops with ingredients ALL count as "fridge" type.
+- "other" = clearly not food related
 
 Known ingredients in our database: {known_str}
 
 Extraction rules:
 1. Extract EVERY food item visible — spices, condiments, proteins, vegetables, grains, oils, flours, sauces, dairy
-2. Match to closest name in database. Be flexible:
-   - "Royco" → "mixed spice" or "curry powder"
-   - "Pilau masala" → "pilau masala"
-   - "Garam masala" / "Garama masala" → "garam masala"
-   - "Cumin" / "jeera" → "cumin"
-   - "Coriander" / "dhania" → "coriander powder"
-   - "Paprika" → "paprika"
-   - "Tumeric" / "turmeric" → "turmeric"
-   - "Chilli flakes" → "chilli flakes"
-   - "Black pepper" → "black pepper"
-   - "Salt" → "salt"
-   - Any spice jar/packet = include it
+2. Match to closest name in database
 3. Ignore toiletries, cleaning products, non-food items
 4. If item not exactly in database, include your best match anyway
 
@@ -1979,9 +1990,9 @@ Respond ONLY in valid JSON:
 
 
 def handle_photo(media_url: str, media_type: str, user: dict) -> str:
-    """Full photo -> pantry flow with confirmation step."""
     name = user.get("full_name", "Friend")
     user_id = user["id"]
+    lang = user.get("language", "en")
 
     if not ANTHROPIC_API_KEY:
         return (
@@ -2014,7 +2025,6 @@ def handle_photo(media_url: str, media_type: str, user: dict) -> str:
             "Or just type: _I have tomatoes, eggs, garlic_"
         )
 
-    # Store pending ingredients for confirmation
     update_user(user_id, {"pending_photo_ingredients": json.dumps(found)})
 
     type_emoji = "🧾" if image_type == "receipt" else "🧊"
@@ -2033,46 +2043,26 @@ def handle_photo(media_url: str, media_type: str, user: dict) -> str:
     ]
     return "\n".join(lines)
 
-# ── Twilio interactive messaging ──────────────────────────────────────────────
 
-def send_buttons(to: str, body_text: str, buttons: list[dict]) -> bool:
-    """
-    Send a WhatsApp interactive button message via Twilio API.
-    buttons = [{"id": "cook", "title": "🍳 Cook"}, ...]
-    Max 3 buttons per message. For more, use send_list() instead.
-    Returns True on success.
-    """
-    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
-        log.warning("Twilio credentials not set — cannot send buttons")
-        return False
+# ── Menu helpers ───────────────────────────────────────────────────────────────
 
-    # Twilio Content API for interactive messages
-    url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+def main_menu(name: str, lang: str = "en") -> str:
+    return t("main_menu", lang, name=name)
 
-    # Build button payload
-    action_buttons = [
-        {"type": "reply", "reply": {"id": b["id"], "title": b["title"][:20]}}
-        for b in buttons[:3]
-    ]
 
-    payload = {
-        "From": TWILIO_FROM,
-        "To": to,
-        "ContentSid": "",  # not using content templates
-        "Body": body_text,
-        # Interactive buttons via MessagingV2 requires content templates on Twilio
-        # Fall back to plain text with numbered options
-    }
+def pantry_menu(name: str, lang: str = "en") -> str:
+    return t("pantry_menu", lang, name=name)
 
-    # NOTE: Twilio WhatsApp sandbox supports interactive messages only via
-    # Content Templates. For sandbox testing we send rich plain text instead.
-    # When moving to production WhatsApp Business, replace with Content API calls.
-    log.info(f"Button send requested to {to}: {[b['title'] for b in buttons]}")
-    return False  # signal to caller to use plain text fallback
+
+def profile_menu(name: str, lang: str = "en") -> str:
+    return t("profile_menu", lang, name=name)
+
+
+def cooking_followup(recipe_name: str, lang: str = "en") -> str:
+    return t("cooking_followup", lang, recipe_name=recipe_name)
 
 
 def send_message(to: str, text: str):
-    """Send a plain text WhatsApp message via Twilio REST API."""
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
         return
     try:
@@ -2087,30 +2077,10 @@ def send_message(to: str, text: str):
         log.warning(f"send_message failed: {e}")
 
 
-def main_menu(name: str, lang: str = "en") -> str:
-    """Return the main menu."""
-    return t("main_menu", lang, name=name)
-
-
-def pantry_menu(name: str, lang: str = "en") -> str:
-    """Pantry submenu."""
-    return t("pantry_menu", lang, name=name)
-def profile_menu(name: str, lang: str = "en") -> str:
-    """Profile submenu."""
-    return t("profile_menu", lang, name=name)
-
-
-def cooking_followup(recipe_name: str, lang: str = "en") -> str:
-    """Ask user if they cooked or used ingredients after a recipe suggestion."""
-    return t("cooking_followup", lang, recipe_name=recipe_name)
-
-
 # ── Webhook ────────────────────────────────────────────────────────────────────
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
-    # ── Security checks ────────────────────────────────────────────────────────
-    # 1. Validate Twilio signature (non-strict by default — logs but allows through)
     validate_twilio_signature(request)
 
     body = sanitise_input(request.values.get("Body", ""))
@@ -2128,7 +2098,6 @@ def whatsapp():
     if not from_number:
         return str(response)
 
-    # 2. Rate limiting
     if is_rate_limited(from_number):
         log.warning(f"🚨 Rate limit exceeded for {from_number}")
         msg_obj.body("⏳ You're sending messages too fast. Please wait a moment and try again.")
@@ -2142,7 +2111,6 @@ def whatsapp():
     user_id = user["id"]
     log_message(user_id, "inbound", body or "[photo]")
 
-    # Photo received
     if num_media > 0 and media_url and media_type.startswith("image/"):
         if not user.get("onboarding_complete"):
             reply = "👋 Please finish setting up your profile first! Reply *hi* to continue."
@@ -2152,7 +2120,6 @@ def whatsapp():
         log_message(user_id, "outbound", reply)
         return str(response)
 
-    # Text message
     if not body:
         return str(response)
 
@@ -2160,6 +2127,9 @@ def whatsapp():
         reply, _ = handle_onboarding(user, body)
     else:
         reply = route(body, user)
+        # handle_reentry may signal to fall back to onboarding for mid-setup users
+        if reply is None:
+            reply, _ = handle_onboarding(user, body)
 
     msg_obj.body(reply)
     log_message(user_id, "outbound", reply)
@@ -2172,7 +2142,7 @@ def whatsapp():
 
 @app.route("/health")
 def health():
-    return {"status": "ok", "bot": "PantryChef"}
+    return {"status": "ok", "bot": "Tunapika"}
 
 
 @app.route("/debug/pantry/<whatsapp_number>")
