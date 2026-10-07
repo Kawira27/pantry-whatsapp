@@ -1014,16 +1014,17 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
 
 def conversation_closer(name: str, lang: str = "en", prefix: str = "") -> str:
     """Warm conversation ender — shown after rating or 'not yet'."""
+    prefix_block = (prefix + "\n\n") if prefix else ""
     if lang == "sw":
         closer = (
-            f"{'%s\n\n' % prefix if prefix else ''}"
+            f"{prefix_block}"
             f"Hiyo inatosha kwa sasa, *{name}*! 🍳\n"
             "Rudi unapohisi njaa tena 😊\n\n"
             "_Andika *hi* wakati wowote_ 👋"
         )
     else:
         closer = (
-            f"{'%s\n\n' % prefix if prefix else ''}"
+            f"{prefix_block}"
             f"That's it from me for now, *{name}*! 🍳\n"
             "Come back when you're hungry again 😊\n\n"
             "_Reply *hi* anytime_ 👋"
