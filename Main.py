@@ -92,6 +92,32 @@ CUISINES = [
     "Mexican", "Mediterranean", "American", "International"
 ]
 
+# ── Tier limits ────────────────────────────────────────────────────────────────
+TIER_LIMITS = {
+    "free": {
+        "recipe_suggestions": 5,
+        "photo_scans": 2,
+        "ai_chef_chats": 3,
+        "pantry_items": 20,
+        "saved_recipes": 5,
+    },
+    "premium": {
+        "recipe_suggestions": 999,
+        "photo_scans": 999,
+        "ai_chef_chats": 999,
+        "pantry_items": 999,
+        "saved_recipes": 999,
+    },
+}
+
+PREMIUM_PRICE = "Ksh 299/month"
+
+# ── Abuse filter — basic keyword list (DB has more) ───────────────────────────
+LOCAL_BLOCKED = [
+    "fuck", "shit", "bitch", "bastard", "kill yourself",
+    "i will hack", "motherfucker", "asshole", "cunt",
+]
+
 HELP_MSG = """🍳 *Tunapika* — What can I do?
 
 *Getting recipes:*
@@ -749,6 +775,154 @@ def get_nutrition_summary(user_id: str, lang: str = "en") -> str:
     return "\n".join(lines)
 
 
+# ── Abuse filter ──────────────────────────────────────────────────────────────
+
+def is_abusive(message: str) -> bool:
+    """Check message against local blocklist and DB blocked phrases."""
+    m = message.lower()
+    if any(word in m for word in LOCAL_BLOCKED):
+        return True
+    try:
+        res = supabase.table("blocked_phrases").select("phrase").execute()
+        db_phrases = [r["phrase"].lower() for r in res.data]
+        if any(phrase in m for phrase in db_phrases):
+            return True
+    except Exception as e:
+        log.warning(f"Blocked phrases DB check failed: {e}")
+    return False
+
+
+def block_user(user_id: str, reason: str = "abusive behaviour"):
+    update_user(user_id, {"is_blocked": True, "block_reason": reason})
+    log.warning(f"🚫 User {user_id} blocked: {reason}")
+
+
+# ── Usage tracking ─────────────────────────────────────────────────────────────
+
+def get_daily_usage(user_id: str) -> dict:
+    from datetime import date
+    today = date.today().isoformat()
+    try:
+        res = supabase.table("daily_usage").select("*").eq("user_id", user_id).eq("usage_date", today).execute()
+        if res.data:
+            return res.data[0]
+        insert = supabase.table("daily_usage").insert({
+            "user_id": user_id,
+            "usage_date": today,
+            "recipe_suggestions": 0,
+            "photo_scans": 0,
+            "ai_chef_chats": 0,
+        }).execute()
+        return insert.data[0] if insert.data else {}
+    except Exception as e:
+        log.warning(f"Daily usage fetch failed: {e}")
+        return {}
+
+
+def increment_usage(user_id: str, feature: str):
+    from datetime import date
+    today = date.today().isoformat()
+    try:
+        usage = get_daily_usage(user_id)
+        current = usage.get(feature, 0)
+        supabase.table("daily_usage").update({
+            feature: current + 1,
+        }).eq("user_id", user_id).eq("usage_date", today).execute()
+    except Exception as e:
+        log.warning(f"Usage increment failed: {e}")
+
+
+def check_limit(user: dict, feature: str) -> tuple:
+    """Returns (allowed: bool, message: str)"""
+    from datetime import datetime
+    user_id = user["id"]
+    lang = user.get("language", "en")
+    sw = lang == "sw"
+
+    tier = user.get("tier", "free")
+    premium_expires = user.get("premium_expires_at")
+    if tier == "premium" and premium_expires:
+        try:
+            expires = datetime.fromisoformat(premium_expires.replace("Z", "+00:00"))
+            if datetime.now(expires.tzinfo) > expires:
+                update_user(user_id, {"tier": "free", "premium_expires_at": None})
+                tier = "free"
+        except Exception:
+            pass
+
+    limit = TIER_LIMITS.get(tier, TIER_LIMITS["free"]).get(feature, 999)
+    usage = get_daily_usage(user_id)
+    current = usage.get(feature, 0)
+
+    if current >= limit:
+        if sw:
+            msg = (
+                f"⚠️ Umefika kikomo chako cha leo cha *{limit}* kwa kipengele hiki.\n\n"
+                f"⭐ *Pata Premium kwa {PREMIUM_PRICE}* na upate:\n"
+                "• Mapendekezo ya mapishi yasio na kikomo\n"
+                "• Uchanganuzi wa picha bila kikomo\n"
+                "• Mazungumzo na mpishi bila kikomo\n"
+                "• Mpango wa wiki + Muhtasari wa lishe\n\n"
+                "Andika *premium* kujua zaidi! 🚀"
+            )
+        else:
+            msg = (
+                f"⚠️ You've reached your daily limit of *{limit}* for this feature.\n\n"
+                f"⭐ *Upgrade to Premium for {PREMIUM_PRICE}* and get:\n"
+                "• Unlimited recipe suggestions\n"
+                "• Unlimited photo scanning\n"
+                "• Unlimited Chat with Chef\n"
+                "• Weekly meal plans + Nutrition summaries\n\n"
+                "Reply *premium* to upgrade! 🚀"
+            )
+        return False, msg
+    return True, ""
+
+
+def is_premium(user: dict) -> bool:
+    from datetime import datetime
+    if user.get("tier") != "premium":
+        return False
+    expires = user.get("premium_expires_at")
+    if not expires:
+        return False
+    try:
+        exp = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+        return datetime.now(exp.tzinfo) <= exp
+    except Exception:
+        return False
+
+
+def upgrade_info(lang: str = "en") -> str:
+    if lang == "sw":
+        return (
+            "⭐ *Tunapika Premium*\n\n"
+            f"*{PREMIUM_PRICE}* — Ghaghawa ya M-Pesa\n\n"
+            "Unapata nini:\n"
+            "✅ Mapendekezo ya mapishi yasio na kikomo\n"
+            "✅ Uchanganuzi wa picha bila kikomo\n"
+            "✅ Mazungumzo na mpishi bila kikomo\n"
+            "✅ Mpango wa chakula wa wiki\n"
+            "✅ Muhtasari wa lishe\n"
+            "✅ Pantry ya familia (hivi karibuni)\n\n"
+            "💳 Malipo ya M-Pesa yanaendelea — hivi karibuni!\n"
+            "Kwa sasa wasiliana nasi moja kwa moja kukuwezesha."
+        )
+    return (
+        "⭐ *Tunapika Premium*\n\n"
+        f"*{PREMIUM_PRICE}* — paid via M-Pesa\n\n"
+        "What you get:\n"
+        "✅ Unlimited recipe suggestions\n"
+        "✅ Unlimited photo scanning\n"
+        "✅ Unlimited Chat with Chef\n"
+        "✅ Weekly meal plans\n"
+        "✅ Nutrition summaries\n"
+        "✅ Family shared pantry (coming soon)\n\n"
+        "💳 M-Pesa payments coming soon!\n"
+        "For now contact us directly to get enabled."
+    )
+
+
 # ── Onboarding ─────────────────────────────────────────────────────────────────
 
 def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
@@ -1306,6 +1480,11 @@ def route(msg: str, user: dict) -> str:
             "high protein", "low carb", "what can i make", "ninaweza kupika"
         ]):
             update_user(user_id, {"awaiting_chef_chat": False})
+
+            allowed, limit_msg = check_limit(user, "ai_chef_chats")
+            if not allowed:
+                return limit_msg
+
             pantry = get_pantry_names(user_id)
             if not pantry:
                 return t("pantry_empty", lang, name=name)
@@ -1374,6 +1553,7 @@ Return ONLY valid JSON:
                                 break
 
                     if shown:
+                        increment_usage(user_id, "ai_chef_chats")
                         option_ids = [str(r["id"]) for r in shown]
                         update_user(user_id, {"pending_recipe_options": json.dumps(option_ids)})
                         lines = [f"👨‍🍳 {chef_message}\n"]
@@ -1633,8 +1813,20 @@ Return ONLY valid JSON:
         ]
         return "\n".join(lines)
 
-    # MEAL PREP PLAN
+    # MEAL PREP PLAN (premium only)
     if "meal prep" in m or "weekly plan" in m or "week plan" in m:
+        if not is_premium(user):
+            if lang == "sw":
+                return (
+                    f"📅 Mpango wa wiki ni kipengele cha *Premium*!\n\n"
+                    f"Pata Premium kwa {PREMIUM_PRICE} na upate mpango kamili wa wiki.\n\n"
+                    "Andika *premium* kujua zaidi! ⭐"
+                )
+            return (
+                f"📅 Weekly meal plans are a *Premium* feature!\n\n"
+                f"Upgrade for {PREMIUM_PRICE} to get a full weekly plan tailored to your pantry.\n\n"
+                "Reply *premium* to learn more! ⭐"
+            )
         pantry = get_pantry_names(user_id)
         if not pantry:
             return f"😅 Your pantry is empty, {name}! Tell me what you have at home first."
@@ -1708,6 +1900,9 @@ Return ONLY valid JSON:
     if meal_type or m in ("5", "surprise me", "surprise", "chochote"):
         if m in ("5", "surprise me", "surprise", "chochote"):
             meal_type = None
+        allowed, limit_msg = check_limit(user, "recipe_suggestions")
+        if not allowed:
+            return limit_msg
         pantry = get_pantry_names(user_id)
         if not pantry:
             return (
@@ -1770,6 +1965,7 @@ Return ONLY valid JSON:
             lines.append(f"Reply *1*–*{num}* to see the full recipe!")
             if len(matches) == 0:
                 lines.append("✨ Or *create recipe* for a custom AI one!")
+            increment_usage(user_id, "recipe_suggestions")
             return "\n".join(lines)
 
         if ANTHROPIC_API_KEY:
@@ -1891,9 +2087,53 @@ Return ONLY valid JSON:
         lines += ["\nReply *cook* to see what you can make now! 🍳"]
         return "\n".join(lines)
 
-    # NUTRITION
+    # NUTRITION (premium only)
     if any(p in m for p in ["nutrition", "calories", "macros", "health stats", "lishe"]):
+        if not is_premium(user):
+            if lang == "sw":
+                return (
+                    f"📊 Muhtasari wa lishe ni kipengele cha *Premium*!\n\n"
+                    f"Pata Premium kwa {PREMIUM_PRICE} ufuatilie lishe yako.\n\n"
+                    "Andika *premium* kujua zaidi! ⭐"
+                )
+            return (
+                f"📊 Nutrition summaries are a *Premium* feature!\n\n"
+                f"Upgrade for {PREMIUM_PRICE} to track your daily nutrition.\n\n"
+                "Reply *premium* to learn more! ⭐"
+            )
         return get_nutrition_summary(user_id, lang)
+
+    # PREMIUM INFO
+    if m in ("premium", "upgrade", "subscribe", "bei", "bei ya premium"):
+        return upgrade_info(lang)
+
+    # MY PLAN / TIER STATUS
+    if m in ("my plan", "my tier", "plan yangu", "subscription", "account"):
+        tier = user.get("tier", "free")
+        expires = user.get("premium_expires_at", "")
+        if is_premium(user):
+            if lang == "sw":
+                return f"⭐ Wewe ni mtumiaji wa *Premium*! Asante, {name} 🙏\n\nMuda wa kumalizika: {expires[:10] if expires else 'haujawekwa'}\n\nFurahia vipengele vyote bila kikomo!"
+            return f"⭐ You're on *Premium*, {name}! Thank you 🙏\n\nExpires: {expires[:10] if expires else 'not set'}\n\nEnjoy all features without limits!"
+        else:
+            usage = get_daily_usage(user["id"])
+            if lang == "sw":
+                return (
+                    f"📋 *Mpango wako: Bure*\n\n"
+                    f"Matumizi ya leo:\n"
+                    f"• Mapendekezo ya mapishi: {usage.get('recipe_suggestions', 0)}/5\n"
+                    f"• Uchanganuzi wa picha: {usage.get('photo_scans', 0)}/2\n"
+                    f"• Mazungumzo na mpishi: {usage.get('ai_chef_chats', 0)}/3\n\n"
+                    "Andika *premium* kupata vipengele zaidi! ⭐"
+                )
+            return (
+                f"📋 *Your plan: Free*\n\n"
+                f"Today's usage:\n"
+                f"• Recipe suggestions: {usage.get('recipe_suggestions', 0)}/5\n"
+                f"• Photo scans: {usage.get('photo_scans', 0)}/2\n"
+                f"• Chat with Chef: {usage.get('ai_chef_chats', 0)}/3\n\n"
+                "Reply *premium* to unlock everything! ⭐"
+            )
 
     # DEFAULT FALLBACK
     return (
@@ -2186,11 +2426,39 @@ def whatsapp():
     user_id = user["id"]
     log_message(user_id, "inbound", body or f"[{len(media_files)} photo(s)]")
 
+    # Block check
+    if user.get("is_blocked"):
+        msg_obj.body("⛔ Your account has been suspended for violating our terms of service.")
+        return str(response)
+
+    # Abuse filter on text messages
+    if body and is_abusive(body):
+        strikes = (user.get("abuse_strikes") or 0) + 1
+        update_user(user_id, {"abuse_strikes": strikes})
+        log.warning(f"⚠️ Abusive message from {from_number} (strike {strikes})")
+        if strikes >= 3:
+            block_user(user_id, "repeated abusive messages")
+            msg_obj.body("⛔ Your account has been suspended due to repeated violations of our Terms & Conditions.")
+        else:
+            remaining = 3 - strikes
+            warn = "1 more violation" if remaining == 1 else f"{remaining} more violations"
+            msg_obj.body(
+                f"⚠️ That message contained inappropriate content.\n\n"
+                f"Please keep conversations respectful. "
+                f"{warn} will result in a permanent ban."
+            )
+        return str(response)
+
     if media_files:
         if not user.get("onboarding_complete"):
             reply = "👋 Please finish setting up your profile first! Reply *hi* to continue."
         else:
-            reply = handle_photo(media_files, user)
+            allowed, limit_msg = check_limit(user, "photo_scans")
+            if not allowed:
+                reply = limit_msg
+            else:
+                increment_usage(user_id, "photo_scans")
+                reply = handle_photo(media_files, user)
         msg_obj.body(reply)
         log_message(user_id, "outbound", reply)
         return str(response)
