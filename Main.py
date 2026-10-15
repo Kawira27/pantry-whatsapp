@@ -2170,7 +2170,7 @@ def analyse_photo_with_claude(image_b64: str, media_type: str, known_ingredients
     known_str = ", ".join(known_ingredients[:150])
     prompt = f"""You are a smart pantry assistant for a Kenyan cooking app. The user sent an image showing their food/ingredients.
 
-Your job: extract ALL food ingredients visible in the image.
+Your job: extract ALL food ingredients visible in the image. Be thorough — do not skip anything.
 
 Image type:
 - "receipt" = shopping receipt, till slip, or written shopping list
@@ -2181,9 +2181,15 @@ Known ingredients in our database: {known_str}
 
 Extraction rules:
 1. Extract EVERY food item visible — spices, condiments, proteins, vegetables, grains, oils, flours, sauces, dairy
-2. Match to closest name in database
-3. Ignore toiletries, cleaning products, non-food items
-4. If item not exactly in database, include your best match anyway
+2. Pay SPECIAL attention to:
+   - Small fruits and berries: strawberries, blueberries, raspberries, grapes — look carefully even if small or partially visible
+   - Fruits in bowls, bags, or containers — identify each fruit individually
+   - Items in packaging — read the label if visible, otherwise describe what's inside
+   - Partially hidden items — if you can identify it, include it
+3. Match each item to the closest name in the database
+4. If item not exactly in database, include your best descriptive name anyway
+5. Ignore toiletries, cleaning products, non-food items
+6. When in doubt about a food item, INCLUDE it rather than skip it
 
 Respond ONLY in valid JSON:
 {{"image_type": "receipt" | "fridge" | "other", "ingredients_found": ["ingredient1", "ingredient2", ...]}}"""
