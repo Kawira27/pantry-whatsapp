@@ -276,6 +276,190 @@ def get_pantry_names(user_id: str) -> list[str]:
     return [i["name"].lower() for i in get_user_pantry(user_id)]
 
 
+# ── Household / Shared Pantry ──────────────────────────────────────────────────
+
+def get_household_members(household_id: str) -> list[dict]:
+    """Return all users in a household."""
+    try:
+        res = supabase.table("users").select("id, full_name, whatsapp_number").eq("household_id", household_id).execute()
+        return res.data or []
+    except Exception as e:
+        log.warning(f"get_household_members failed: {e}")
+        return []
+
+
+def get_household_pantry_names(user: dict) -> list[str]:
+    """Return merged pantry for user + all household members."""
+    household_id = user.get("household_id")
+    if not household_id:
+        return get_pantry_names(user["id"])
+    members = get_household_members(household_id)
+    all_names: set[str] = set()
+    for m in members:
+        all_names.update(get_pantry_names(m["id"]))
+    return list(all_names)
+
+
+def create_household(user_id: str, name: str = None) -> dict | None:
+    """Create a new household, set the creator as a member."""
+    try:
+        res = supabase.table("households").insert({
+            "created_by": user_id,
+            "name": name,
+        }).execute()
+        if not res.data:
+            return None
+        household = res.data[0]
+        supabase.table("users").update({"household_id": household["id"]}).eq("id", user_id).execute()
+        return household
+    except Exception as e:
+        log.warning(f"create_household failed: {e}")
+        return None
+
+
+def join_household_by_code(user_id: str, code: str) -> dict | None:
+    """Join an existing household via invite code."""
+    try:
+        res = supabase.table("households").select("*").eq("invite_code", code.upper().strip()).execute()
+        if not res.data:
+            return None
+        household = res.data[0]
+        supabase.table("users").update({"household_id": household["id"]}).eq("id", user_id).execute()
+        return household
+    except Exception as e:
+        log.warning(f"join_household_by_code failed: {e}")
+        return None
+
+
+def leave_household(user_id: str):
+    """Remove user from their household."""
+    try:
+        supabase.table("users").update({"household_id": None}).eq("id", user_id).execute()
+    except Exception as e:
+        log.warning(f"leave_household failed: {e}")
+
+
+def handle_household(msg: str, user: dict) -> str:
+    """Handle all household/shared pantry commands."""
+    m = msg.strip().lower()
+    user_id = user["id"]
+    lang = user.get("language", "en")
+    name = user.get("full_name", "Friend")
+    sw = lang == "sw"
+    household_id = user.get("household_id")
+
+    # Show household status / menu
+    if m in ("household", "shared pantry", "family pantry", "familia", "nyumba"):
+        if household_id:
+            members = get_household_members(household_id)
+            member_names = [m2.get("full_name") or "Member" for m2 in members]
+            try:
+                hh = supabase.table("households").select("invite_code, name").eq("id", household_id).execute()
+                invite_code = hh.data[0]["invite_code"] if hh.data else "??????"
+                hh_name = hh.data[0].get("name") or "Your Household"
+            except Exception:
+                invite_code = "??????"
+                hh_name = "Your Household"
+            if sw:
+                return (
+                    f"👨‍👩‍👧 *{hh_name}*\n\n"
+                    f"Wanachama ({len(members)}): {', '.join(member_names)}\n"
+                    f"Nambari ya mwaliko: *{invite_code}*\n\n"
+                    "_Shiriki nambari hii na familia yako ili wajiunganishe!_\n\n"
+                    "• Andika *leave household* kutoka kwenye kikundi"
+                )
+            return (
+                f"👨‍👩‍👧 *{hh_name}*\n\n"
+                f"Members ({len(members)}): {', '.join(member_names)}\n"
+                f"Invite code: *{invite_code}*\n\n"
+                "_Share this code with family to join your shared pantry!_\n\n"
+                "• Type *leave household* to leave the group"
+            )
+        else:
+            if sw:
+                return (
+                    f"👨‍👩‍👧 *Pantry ya Pamoja*\n\n"
+                    "Shiriki pantry na familia yako — mtu yeyote anayeongeza viungo, "
+                    "kila mtu ataona!\n\n"
+                    "• Andika *create household* kuunda kikundi kipya\n"
+                    "• Andika *join XXXXXX* kujiunga na kikundi (tumia nambari ya mwaliko)"
+                )
+            return (
+                f"👨‍👩‍👧 *Shared Pantry*\n\n"
+                "Share your pantry with family — anyone who adds ingredients, "
+                "everyone can cook with them!\n\n"
+                "• Type *create household* to start a new group\n"
+                "• Type *join XXXXXX* to join one (use the invite code)"
+            )
+
+    # Create household
+    if m in ("create household", "create family", "unda kikundi"):
+        if household_id:
+            if sw:
+                return "⚠️ Tayari uko kwenye kikundi! Andika *household* kuona maelezo."
+            return "⚠️ You're already in a household! Type *household* to see details."
+        hh = create_household(user_id, name=f"{name}'s Kitchen")
+        if not hh:
+            return "😕 Something went wrong. Please try again."
+        code = hh["invite_code"]
+        if sw:
+            return (
+                f"✅ Kikundi chako kimoundwa!\n\n"
+                f"Nambari ya mwaliko: *{code}*\n\n"
+                f"Mwambie mtu wa familia yako:\n"
+                f"_Andika 'join {code}' kwenye Tunapika_\n\n"
+                "Pantry yenu itashirikiwa mara moja! 🎉"
+            )
+        return (
+            f"✅ Your household is created!\n\n"
+            f"Invite code: *{code}*\n\n"
+            f"Tell your family member:\n"
+            f"_Type 'join {code}' on Tunapika_\n\n"
+            "Your pantry will be shared instantly! 🎉"
+        )
+
+    # Join household
+    if m.startswith("join "):
+        code = msg.strip()[5:].strip()
+        if not code:
+            return "Type the invite code after join, e.g. _join ABC123_"
+        if household_id:
+            if sw:
+                return "⚠️ Tayari uko kwenye kikundi! Toka kwanza kwa *leave household*."
+            return "⚠️ You're already in a household! Type *leave household* first."
+        hh = join_household_by_code(user_id, code)
+        if not hh:
+            if sw:
+                return f"❌ Nambari '{code}' haikupatikana. Angalia tena na ujaribu."
+            return f"❌ Code '{code}' not found. Double-check and try again."
+        members = get_household_members(hh["id"])
+        member_names = [m2.get("full_name") or "Member" for m2 in members if m2["id"] != user_id]
+        if sw:
+            return (
+                f"✅ Umejiunga na kikundi cha *{hh.get('name', 'familia')}*!\n\n"
+                f"Wanachama: {', '.join(member_names) or 'wewe peke yako kwa sasa'}\n\n"
+                "Pantry yenu sasa inashirikiwa. Andika *cook* kupata mapendekezo! 🎉"
+            )
+        return (
+            f"✅ You've joined *{hh.get('name', 'the household')}*!\n\n"
+            f"Members: {', '.join(member_names) or 'just you so far'}\n\n"
+            "Your pantries are now shared. Type *cook* for recipe suggestions! 🎉"
+        )
+
+    # Leave household
+    if m in ("leave household", "leave family", "toka kikundi"):
+        if not household_id:
+            if sw:
+                return "Huko kwenye kikundi chochote bado."
+            return "You're not in a household yet."
+        leave_household(user_id)
+        if sw:
+            return "✅ Umetoka kwenye kikundi. Pantry yako sasa ni yako peke yako."
+        return "✅ You've left the household. Your pantry is now individual again."
+
+    return ""
+
+
 def find_ingredient_by_name(name: str) -> dict | None:
     res = supabase.table("ingredients").select("id, name").ilike("name", name.strip()).execute()
     if res.data:
@@ -742,13 +926,13 @@ def shopping_list_for_recipe(recipe_name: str, user_id: str, pantry_names: list[
 
 # ── Nutrition Summary ──────────────────────────────────────────────────────────
 
-def get_nutrition_summary(user_id: str, lang: str = "en") -> str:
+def get_nutrition_summary(user_id: str, lang: str = "en", user: dict = None) -> str:
     res = (
         supabase.table("user_recipe_suggestions")
-        .select("recipes(name, calories_per_serving, protein_g, carbs_g, fat_g)")
+        .select("recipes(name, calories_per_serving, protein_g, carbs_g, fat_g), shown_at")
         .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(7)
+        .order("shown_at", desc=True)
+        .limit(14)
         .execute()
     )
 
@@ -756,22 +940,83 @@ def get_nutrition_summary(user_id: str, lang: str = "en") -> str:
     if not recipes:
         return t("nutrition_empty", lang)
 
-    total_cal = sum(r["calories_per_serving"] for r in recipes if r.get("calories_per_serving"))
+    count = len(recipes)
+    total_cal = sum(r["calories_per_serving"] for r in recipes)
     total_protein = sum(float(r["protein_g"] or 0) for r in recipes)
     total_carbs = sum(float(r["carbs_g"] or 0) for r in recipes)
     total_fat = sum(float(r["fat_g"] or 0) for r in recipes)
-    count = len(recipes)
 
-    lines = [
-        "📊 *Your Nutrition Summary*",
-        f"_Based on your last {count} meals_", "",
-        f"🔥 Avg calories: *{total_cal // count} cal/meal*",
-        f"💪 Total protein: *{total_protein:.0f}g*",
-        f"🌾 Total carbs: *{total_carbs:.0f}g*",
-        f"🥑 Total fat: *{total_fat:.0f}g*", "",
-        "Recent meals:",
-    ]
-    lines += [f"  • {r['name']}" for r in recipes[:5]]
+    avg_cal = total_cal // count
+    avg_protein = total_protein / count
+    avg_carbs = total_carbs / count
+    avg_fat = total_fat / count
+
+    # Daily reference values (approximate adult)
+    CAL_TARGET = 2000
+    PROTEIN_TARGET = 50
+    CARBS_TARGET = 275
+    FAT_TARGET = 78
+
+    # Health goal context
+    health_goals = []
+    if user:
+        health_goals = user.get("health_goals") or []
+
+    goal_tip = ""
+    if "1" in health_goals or "weight loss" in " ".join(health_goals).lower():
+        if avg_cal > 600:
+            goal_tip = "💡 _Tip: Your meals avg high calories. Try more veggies and lean protein._"
+        else:
+            goal_tip = "✅ _Good calorie control for your weight loss goal!_"
+    elif "2" in health_goals or "muscle" in " ".join(health_goals).lower():
+        if avg_protein < 25:
+            goal_tip = "💡 _Tip: Boost protein — add eggs, beans, chicken or fish to meals._"
+        else:
+            goal_tip = "✅ _Great protein intake for muscle building!_"
+    elif "3" in health_goals or "balanced" in " ".join(health_goals).lower():
+        goal_tip = "✅ _Your macros look balanced. Keep it up!_"
+
+    # Simple balance score (0–5 stars)
+    score = 0
+    if avg_cal <= CAL_TARGET * 0.4: score += 1
+    if avg_protein >= PROTEIN_TARGET * 0.4: score += 1
+    if avg_carbs <= CARBS_TARGET * 0.5: score += 1
+    if avg_fat <= FAT_TARGET * 0.4: score += 1
+    if count >= 5: score += 1
+    stars = "⭐" * score + "☆" * (5 - score)
+
+    sw = lang == "sw"
+    if sw:
+        lines = [
+            "📊 *Muhtasari wa Lishe Yako*",
+            f"_Kulingana na milo yako {count} ya hivi karibuni_", "",
+            f"🔥 Kalori wastani: *{avg_cal} kcal/mlo*",
+            f"💪 Protini wastani: *{avg_protein:.0f}g/mlo*",
+            f"🌾 Wanga wastani: *{avg_carbs:.0f}g/mlo*",
+            f"🥑 Mafuta wastani: *{avg_fat:.0f}g/mlo*", "",
+            f"⚖️ Alama ya usawa: {stars}", "",
+            "🍽️ Milo ya hivi karibuni:",
+        ]
+        lines += [f"  • {r['name']}" for r in recipes[:5]]
+        if goal_tip:
+            lines += ["", goal_tip]
+        lines += ["", "_Jibu *cook* kupata mapendekezo mapya!_"]
+    else:
+        lines = [
+            "📊 *Your Nutrition Summary*",
+            f"_Based on your last {count} meals_", "",
+            f"🔥 Avg calories: *{avg_cal} kcal/meal*",
+            f"💪 Avg protein: *{avg_protein:.0f}g/meal*",
+            f"🌾 Avg carbs: *{avg_carbs:.0f}g/meal*",
+            f"🥑 Avg fat: *{avg_fat:.0f}g/meal*", "",
+            f"⚖️ Balance score: {stars}", "",
+            "🍽️ Recent meals:",
+        ]
+        lines += [f"  • {r['name']}" for r in recipes[:5]]
+        if goal_tip:
+            lines += ["", goal_tip]
+        lines += ["", "_Reply *cook* for a new recipe suggestion!_"]
+
     return "\n".join(lines)
 
 
@@ -917,7 +1162,7 @@ def upgrade_info(lang: str = "en") -> str:
         "✅ Unlimited Chat with Chef\n"
         "✅ Weekly meal plans\n"
         "✅ Nutrition summaries\n"
-        "✅ Family shared pantry (coming soon)\n\n"
+        "✅ Family shared pantry — type *household* to set up\n\n"
         "💳 M-Pesa payments coming soon!\n"
         "For now contact us directly to get enabled."
     )
@@ -1715,7 +1960,7 @@ Return ONLY valid JSON:
             reply, _ = handle_onboarding({**user, "onboarding_complete": False, "onboarding_step": 0}, m)
             return reply
         elif m in ("3", "nutrition", "lishe", "macros", "calories"):
-            return get_nutrition_summary(user_id, lang)
+            return get_nutrition_summary(user_id, lang, user=user)
         elif m in ("4", "saved recipes", "saved", "mapishi yangu", "favourites"):
             saved = get_saved_recipes(user_id)
             if not saved:
@@ -1827,7 +2072,7 @@ Return ONLY valid JSON:
                 f"Upgrade for {PREMIUM_PRICE} to get a full weekly plan tailored to your pantry.\n\n"
                 "Reply *premium* to learn more! ⭐"
             )
-        pantry = get_pantry_names(user_id)
+        pantry = get_household_pantry_names(user)
         if not pantry:
             return f"😅 Your pantry is empty, {name}! Tell me what you have at home first."
         return generate_meal_plan(user, pantry)
@@ -1860,7 +2105,7 @@ Return ONLY valid JSON:
 
     # CREATE RECIPE (before cook trigger)
     if any(p in m for p in ["create recipe", "generate recipe", "make me a recipe", "invent a recipe", "tengeneza recipe", "unda mapishi"]):
-        pantry = get_pantry_names(user_id)
+        pantry = get_household_pantry_names(user)
         if not pantry:
             return t("ai_recipe_no_pantry", lang)
         if not ANTHROPIC_API_KEY:
@@ -1903,7 +2148,7 @@ Return ONLY valid JSON:
         allowed, limit_msg = check_limit(user, "recipe_suggestions")
         if not allowed:
             return limit_msg
-        pantry = get_pantry_names(user_id)
+        pantry = get_household_pantry_names(user)
         if not pantry:
             return (
                 f"Hey {name}! What do you have at home right now? 🥕\n\n"
@@ -2101,7 +2346,15 @@ Return ONLY valid JSON:
                 f"Upgrade for {PREMIUM_PRICE} to track your daily nutrition.\n\n"
                 "Reply *premium* to learn more! ⭐"
             )
-        return get_nutrition_summary(user_id, lang)
+        return get_nutrition_summary(user_id, lang, user=user)
+
+    # HOUSEHOLD / SHARED PANTRY
+    if m in ("household", "shared pantry", "family pantry", "familia", "nyumba",
+             "create household", "create family", "unda kikundi",
+             "leave household", "leave family", "toka kikundi") or m.startswith("join "):
+        result = handle_household(msg, user)
+        if result:
+            return result
 
     # PREMIUM INFO
     if m in ("premium", "upgrade", "subscribe", "bei", "bei ya premium"):
