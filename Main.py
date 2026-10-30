@@ -2747,20 +2747,6 @@ def health():
     return {"status": "ok", "bot": "Tunapika"}
 
 
-@app.route("/debug/pantry/<whatsapp_number>")
-def debug_pantry(whatsapp_number):
-    user = get_or_create_user(whatsapp_number, "Debug")
-    if not user:
-        return {"error": "user not found"}
-    pantry = get_pantry_names(user["id"])
-    matches = find_matching_recipes(pantry, user)
-    return {
-        "user": {k: v for k, v in user.items() if k != "id"},
-        "pantry_items": pantry,
-        "matching_recipe_count": len(matches),
-        "matching_recipes": [r["name"] for r in matches],
-    }
-
 
 if __name__ == "__main__":
     app.run(debug=True, port=8000)
