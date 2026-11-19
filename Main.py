@@ -99,7 +99,7 @@ TIER_LIMITS = {
         "photo_scans": 2,
         "ai_chef_chats": 3,
         "pantry_items": 20,
-        "saved_recipes": 5,
+        "saved_recipes": 20,
     },
     "premium": {
         "recipe_suggestions": 999,
@@ -593,33 +593,262 @@ def find_near_matches(pantry_names: list[str], user: dict, meal_type: str = None
     return [r for r in all_matches if len(r.get("missing", [])) > 0]
 
 
-def get_saved_recipes(user_id: str) -> list[str]:
-    res = (
-        supabase.table("saved_recipes")
-        .select("recipes(name)")
-        .eq("user_id", user_id)
-        .execute()
-    )
-    return [r["recipes"]["name"] for r in res.data if r.get("recipes")]
+# ── Cook History & Favourites ──────────────────────────────────────────────────
+
+INGREDIENT_CATEGORIES = {
+    "tomato": "🥦 Produce", "tomatoes": "🥦 Produce", "onion": "🥦 Produce",
+    "onions": "🥦 Produce", "garlic": "🥦 Produce", "ginger": "🥦 Produce",
+    "carrot": "🥦 Produce", "carrots": "🥦 Produce", "potato": "🥦 Produce",
+    "potatoes": "🥦 Produce", "spinach": "🥦 Produce", "kale": "🥦 Produce",
+    "sukuma wiki": "🥦 Produce", "cabbage": "🥦 Produce", "pepper": "🥦 Produce",
+    "peppers": "🥦 Produce", "chilli": "🥦 Produce", "lemon": "🥦 Produce",
+    "lime": "🥦 Produce", "banana": "🥦 Produce", "mango": "🥦 Produce",
+    "avocado": "🥦 Produce", "pumpkin": "🥦 Produce", "courgette": "🥦 Produce",
+    "aubergine": "🥦 Produce", "mushroom": "🥦 Produce", "mushrooms": "🥦 Produce",
+    "chicken": "🥩 Meat & Fish", "beef": "🥩 Meat & Fish", "pork": "🥩 Meat & Fish",
+    "lamb": "🥩 Meat & Fish", "fish": "🥩 Meat & Fish", "tilapia": "🥩 Meat & Fish",
+    "salmon": "🥩 Meat & Fish", "tuna": "🥩 Meat & Fish", "prawns": "🥩 Meat & Fish",
+    "shrimp": "🥩 Meat & Fish", "mince": "🥩 Meat & Fish", "sausage": "🥩 Meat & Fish",
+    "sausages": "🥩 Meat & Fish", "bacon": "🥩 Meat & Fish", "liver": "🥩 Meat & Fish",
+    "milk": "🥛 Dairy & Eggs", "eggs": "🥛 Dairy & Eggs", "egg": "🥛 Dairy & Eggs",
+    "butter": "🥛 Dairy & Eggs", "cheese": "🥛 Dairy & Eggs", "yoghurt": "🥛 Dairy & Eggs",
+    "yogurt": "🥛 Dairy & Eggs", "cream": "🥛 Dairy & Eggs", "ghee": "🥛 Dairy & Eggs",
+    "rice": "🌾 Grains & Staples", "ugali": "🌾 Grains & Staples",
+    "maize flour": "🌾 Grains & Staples", "flour": "🌾 Grains & Staples",
+    "bread": "🌾 Grains & Staples", "pasta": "🌾 Grains & Staples",
+    "noodles": "🌾 Grains & Staples", "oats": "🌾 Grains & Staples",
+    "chapati": "🌾 Grains & Staples", "semolina": "🌾 Grains & Staples",
+    "quinoa": "🌾 Grains & Staples",
+    "beans": "🫘 Legumes", "lentils": "🫘 Legumes", "chickpeas": "🫘 Legumes",
+    "peas": "🫘 Legumes", "green grams": "🫘 Legumes", "ndengu": "🫘 Legumes",
+    "kidney beans": "🫘 Legumes", "black beans": "🫘 Legumes",
+    "oil": "🫙 Pantry", "cooking oil": "🫙 Pantry", "salt": "🫙 Pantry",
+    "sugar": "🫙 Pantry", "cumin": "🫙 Pantry", "coriander": "🫙 Pantry",
+    "turmeric": "🫙 Pantry", "paprika": "🫙 Pantry", "cinnamon": "🫙 Pantry",
+    "cardamom": "🫙 Pantry", "stock": "🫙 Pantry", "tomato paste": "🫙 Pantry",
+    "soy sauce": "🫙 Pantry", "vinegar": "🫙 Pantry", "honey": "🫙 Pantry",
+    "coconut milk": "🫙 Pantry",
+}
+
+def categorise_ingredient(name: str) -> str:
+    lower = name.lower().strip()
+    for key, cat in INGREDIENT_CATEGORIES.items():
+        if key in lower or lower in key:
+            return cat
+    return "🛍️ Other"
 
 
-def save_recipe_by_name(user_id: str, recipe_name: str, user_name: str = "Friend") -> str:
-    res = supabase.table("recipes").select("id, name").ilike("name", f"%{recipe_name.strip()}%").execute()
-    if not res.data:
-        return f"❌ Couldn't find *{recipe_name}*. Try the exact recipe name."
-    recipe = res.data[0]
-    existing = supabase.table("saved_recipes").select("id").eq("user_id", user_id).eq("recipe_id", recipe["id"]).execute()
-    if existing.data:
-        return f"⭐ *{recipe['name']}* is already in your saved recipes!"
-    supabase.table("saved_recipes").insert({"user_id": user_id, "recipe_id": recipe["id"]}).execute()
-    return (
-        f"💾 *{recipe['name']}* saved to your favourites, {user_name}!\n\n"
-        "Find it anytime by typing *saved*.\n\n"
-        "What would you like to do next?\n"
-        "🍳 *cook* — get another recipe\n"
-        "🛒 *shopping list* — top up your pantry\n"
-        "📅 *meal prep* — plan your week"
-    )
+def get_saved_recipes(user_id: str) -> list[dict]:
+    try:
+        res = (
+            supabase.table("saved_recipes")
+            .select("id, title, meal_type, cuisine, is_favourite, cooked_at")
+            .eq("user_id", user_id)
+            .order("cooked_at", desc=True)
+            .execute()
+        )
+        return res.data or []
+    except Exception as e:
+        log.warning(f"get_saved_recipes failed: {e}")
+        return []
+
+
+def save_recipe_for_user(user_id: str, title: str, recipe_text: str,
+                          meal_type: str = None, cuisine: str = None,
+                          user: dict = None) -> str:
+    lang = (user or {}).get("language", "en")
+    name = (user or {}).get("full_name", "Friend")
+    allowed, limit_msg = check_limit(user or {"id": user_id}, "saved_recipes")
+    if not allowed:
+        return limit_msg
+    try:
+        existing = (supabase.table("saved_recipes")
+                    .select("id").eq("user_id", user_id)
+                    .ilike("title", title.strip()).execute())
+        if existing.data:
+            return (f"⭐ *{title}* is already in your saved recipes!"
+                    if lang == "en" else
+                    f"⭐ *{title}* tayari ipo kwenye mapishi yako!")
+        supabase.table("saved_recipes").insert({
+            "user_id": user_id, "title": title.strip(),
+            "recipe_text": recipe_text, "meal_type": meal_type, "cuisine": cuisine,
+        }).execute()
+    except Exception as e:
+        log.warning(f"save_recipe_for_user failed: {e}")
+        return ("❌ Could not save recipe. Try again." if lang == "en"
+                else "❌ Haikuweza kuhifadhi. Jaribu tena.")
+    if lang == "sw":
+        return (f"💾 *{title}* imehifadhiwa, {name}!\n\n"
+                "Pata wakati wowote kwa kuandika *mapishi yangu*.\n\n"
+                "🍳 *cook* — pata mapishi mengine\n"
+                "🛒 *orodha ya manunuzi* — panga manunuzi")
+    return (f"💾 *{title}* saved to your recipes, {name}!\n\n"
+            "Find it anytime by typing *my recipes*.\n\n"
+            "🍳 *cook* — get another recipe\n"
+            "🛒 *shopping list* — plan your shopping")
+
+
+def format_saved_recipes_list(recipes: list[dict], lang: str = "en") -> str:
+    if not recipes:
+        return ("⭐ No saved recipes yet.\n\nAfter getting a recipe, reply *save* to keep it."
+                if lang == "en" else
+                "⭐ Hamna mapishi yaliyohifadhiwa.\n\nBaada ya kupata mapishi, andika *hifadhi*.")
+    lines = ["📖 *Your Saved Recipes*\n" if lang == "en" else "📖 *Mapishi Yako*\n"]
+    for i, r in enumerate(recipes[:20], 1):
+        star = "⭐ " if r.get("is_favourite") else ""
+        meal = f" ({r['meal_type']})" if r.get("meal_type") else ""
+        lines.append(f"{i}. {star}{r['title']}{meal}")
+    lines += ["", ("Type *recipe 3* to see recipe #3, or *cook* for new suggestions."
+                   if lang == "en" else
+                   "Andika *mapishi 3* kuona mapishi #3, au *cook* kwa mapendekezo mapya.")]
+    return "\n".join(lines)
+
+
+def get_saved_recipe_by_number(user_id: str, number: int) -> dict | None:
+    try:
+        res = (supabase.table("saved_recipes").select("*")
+               .eq("user_id", user_id).order("cooked_at", desc=True).execute())
+        recipes = res.data or []
+        if 1 <= number <= len(recipes):
+            return recipes[number - 1]
+    except Exception as e:
+        log.warning(f"get_saved_recipe_by_number failed: {e}")
+    return None
+
+
+# ── Budget-Aware Cooking ───────────────────────────────────────────────────────
+
+def get_user_prices(user_id: str) -> dict:
+    """Return {ingredient_name_lower: {price, unit}} for a user."""
+    try:
+        res = (supabase.table("ingredient_prices")
+               .select("ingredient_name, price_ksh, unit")
+               .eq("user_id", user_id).execute())
+        return {r["ingredient_name"].lower(): {"price": float(r["price_ksh"]), "unit": r.get("unit", "unit")}
+                for r in (res.data or [])}
+    except Exception as e:
+        log.warning(f"get_user_prices failed: {e}")
+        return {}
+
+
+def set_user_price(user_id: str, ingredient: str, price: float, unit: str = "unit") -> str:
+    try:
+        supabase.table("ingredient_prices").upsert({
+            "user_id": user_id,
+            "ingredient_name": ingredient.lower().strip(),
+            "price_ksh": price,
+            "unit": unit,
+            "updated_at": "now()",
+        }, on_conflict="user_id,ingredient_name").execute()
+        return f"✅ Saved: *{ingredient}* = Ksh {price:.0f} per {unit}"
+    except Exception as e:
+        log.warning(f"set_user_price failed: {e}")
+        return "❌ Could not save price. Try again."
+
+
+def remove_user_price(user_id: str, ingredient: str) -> str:
+    try:
+        supabase.table("ingredient_prices").delete().eq("user_id", user_id).eq(
+            "ingredient_name", ingredient.lower().strip()).execute()
+        return f"✅ Removed price for *{ingredient}*."
+    except Exception as e:
+        log.warning(f"remove_user_price failed: {e}")
+        return "❌ Could not remove price. Try again."
+
+
+def format_my_prices(user_id: str, lang: str = "en") -> str:
+    prices = get_user_prices(user_id)
+    if not prices:
+        tip = ("No prices set yet.\n\nSet them with:\n"
+               "*price chicken 350* — Ksh 350 per unit\n"
+               "*price rice 120 kg* — Ksh 120/kg"
+               if lang == "en" else
+               "Hamna bei zilizowekwa.\n\nWeka kwa:\n"
+               "*bei kuku 350* — Ksh 350 kwa kila kipande")
+        return f"💰 *My Ingredient Prices*\n\n{tip}"
+    header = "💰 *My Ingredient Prices*\n" if lang == "en" else "💰 *Bei Zangu*\n"
+    lines = [header]
+    for n, info in sorted(prices.items()):
+        lines.append(f"  • {n.title()} — Ksh {info['price']:.0f}/{info['unit']}")
+    lines += ["", ("Update: *price chicken 400* | Remove: *remove price chicken*"
+                   if lang == "en" else
+                   "Badilisha: *bei kuku 400* | Ondoa: *ondoa bei kuku*")]
+    return "\n".join(lines)
+
+
+def budget_cook_prompt(budget: float, pantry_names: list[str], user: dict) -> str:
+    """Ask Claude to suggest a recipe within the given budget."""
+    user_id = user["id"]
+    lang = user.get("language", "en")
+    prices = get_user_prices(user_id)
+
+    if prices:
+        price_lines = "\n".join(
+            f"- {n.title()}: Ksh {v['price']:.0f} per {v['unit']}" for n, v in prices.items())
+        price_context = (
+            f"The user has set these ingredient prices (Kenyan market):\n{price_lines}\n"
+            "Use these prices to estimate cost. For missing ingredients, estimate based on "
+            "typical Nairobi market prices.")
+    else:
+        price_context = (
+            "The user hasn't set custom prices. Estimate using typical Nairobi market prices "
+            "(chicken breast ~Ksh 350/kg, rice ~Ksh 120/kg, tomatoes ~Ksh 50/kg, "
+            "onions ~Ksh 60/kg, cooking oil ~Ksh 200/litre, eggs ~Ksh 15 each).")
+
+    pantry_str = ", ".join(pantry_names) if pantry_names else "nothing specific"
+    lang_instruction = "Reply in Swahili." if lang == "sw" else "Reply in English."
+
+    prompt = f"""You are a helpful Kenyan cooking assistant. The user wants to cook a meal within Ksh {budget:.0f}.
+
+Their pantry: {pantry_str}
+
+{price_context}
+
+Suggest ONE practical, delicious recipe that fits within Ksh {budget:.0f} for a family of 4, uses Kenyan market ingredients, and prioritises what they already have.
+
+Format:
+🍽️ **[Recipe Name]**
+_[Brief description]_
+
+**Ingredients** (estimated cost):
+- [Ingredient]: [qty] — Ksh [cost]
+**Total estimated cost: Ksh [X]**
+
+**Instructions:**
+1. [Step]
+...
+
+💡 **Budget tip:** [One money-saving tip]
+
+{lang_instruction}"""
+
+    try:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        resp = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=1200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        recipe_text = resp.content[0].text.strip()
+        # Derive a title from the first line (e.g. "🍽️ **Rice and Beans**")
+        first_line = recipe_text.splitlines()[0] if recipe_text else ""
+        title_clean = re.sub(r"[🍽️*_]", "", first_line).strip() or f"Budget Recipe (Ksh {budget:.0f})"
+        # Store for *save* trigger
+        update_user(user_id, {
+            "last_recipe_title": title_clean,
+            "last_recipe_text": recipe_text,
+            "last_recipe_meal_type": None,
+            "last_recipe_cuisine": "Kenyan",
+        })
+        save_prompt = ("\n\n💾 Reply *save* to keep this recipe, or *cook* for more ideas."
+                       if lang == "en" else
+                       "\n\n💾 Andika *hifadhi* kuweka mapishi haya, au *cook* kwa zaidi.")
+        return recipe_text + save_prompt
+    except Exception as e:
+        log.error(f"budget_cook_prompt failed: {e}")
+        return ("❌ Could not generate a budget recipe right now. Try again shortly."
+                if lang == "en" else "❌ Haikuweza kupata mapishi. Jaribu tena.")
 
 
 def log_message(user_id: str, direction: str, body: str):
@@ -729,14 +958,24 @@ def format_recipe_with_followup(recipe: dict, user_id: str, missing: list = None
         lines.append(f"⚠️ *Your pantry is missing:* {', '.join(missing)}")
         lines.append("_You can still try the recipe or grab these on your next shop!_")
         lines.append("")
-    lines.append(format_recipe(recipe, lang=lang))
+    recipe_text = format_recipe(recipe, lang=lang)
+    lines.append(recipe_text)
     update_user(user_id, {
         "last_suggested_recipe_id": str(recipe["id"]),
         "last_suggested_recipe_name": recipe["name"],
+        "last_recipe_text": recipe_text,
+        "last_recipe_title": recipe.get("name", ""),
+        "last_recipe_meal_type": recipe.get("meal_type"),
+        "last_recipe_cuisine": recipe.get("cuisine"),
         "awaiting_cooking_confirmation": True,
     })
     lines.append("")
     lines.append(cooking_followup(recipe["name"], lang))
+    # Invite to save
+    if lang == "sw":
+        lines.append("\n💾 Penda kuhifadhi mapishi haya? Andika *hifadhi*.")
+    else:
+        lines.append("\n💾 Want to save this recipe? Reply *save*.")
     return "\n".join(lines)
 
 
@@ -895,13 +1134,31 @@ def create_shopping_list(user_id: str, items: list[str], name: str = "Shopping L
 
 
 def format_shopping_list(items: list[str], name: str = "Shopping List", lang: str = "en") -> str:
-    lines = [t("shopping_list_header", lang, name=name, count=len(items))]
-    lines += [f"  ☐ {item}" for item in items]
-    lines += ["", t("shopping_list_footer", lang)]
+    """Category-grouped shopping list. Pantry subtraction happens before calling this."""
+    if not items:
+        return ("🎉 You already have everything!\n\nReply *cook* to start cooking."
+                if lang == "en" else
+                "🎉 Una kila kitu! Andika *cook* kuanza kupika.")
+
+    # Group by category
+    grouped: dict[str, list[str]] = {}
+    for item in items:
+        cat = categorise_ingredient(item)
+        grouped.setdefault(cat, []).append(item)
+
+    header = t("shopping_list_header", lang, name=name, count=len(items))
+    lines = [header, ""]
+    for cat in sorted(grouped.keys()):
+        lines.append(f"*{cat}*")
+        lines += [f"  ☐ {i}" for i in sorted(grouped[cat])]
+        lines.append("")
+
+    lines.append(t("shopping_list_footer", lang))
     return "\n".join(lines)
 
 
 def shopping_list_for_recipe(recipe_name: str, user_id: str, pantry_names: list[str]) -> str:
+    """Generate a smart shopping list for a recipe, subtracting pantry items."""
     res = supabase.table("recipes").select(
         "id, name, recipe_ingredients(ingredients(name))"
     ).ilike("name", f"%{recipe_name.strip()}%").execute()
@@ -915,13 +1172,18 @@ def shopping_list_for_recipe(recipe_name: str, user_id: str, pantry_names: list[
         for ri in recipe.get("recipe_ingredients", [])
         if ri.get("ingredients") and ri["ingredients"].get("name")
     ]
-    need_to_buy = [i for i in all_ingredients if i.lower() not in pantry_names]
+    pantry_lower = {p.lower() for p in pantry_names}
+    need_to_buy = [i for i in all_ingredients if i.lower() not in pantry_lower]
+    already_have = [i for i in all_ingredients if i.lower() in pantry_lower]
 
     if not need_to_buy:
         return f"🎉 You already have everything for *{recipe['name']}*!\n\nReply *cook* to get the recipe."
 
     create_shopping_list(user_id, need_to_buy, f"For {recipe['name']}")
-    return format_shopping_list(need_to_buy, f"For {recipe['name']}")
+    result = format_shopping_list(need_to_buy, f"For {recipe['name']}")
+    if already_have:
+        result += f"\n\n✅ _Already in pantry: {', '.join(already_have)}_"
+    return result
 
 
 # ── Nutrition Summary ──────────────────────────────────────────────────────────
@@ -1641,6 +1903,22 @@ def route(msg: str, user: dict) -> str:
                 "3️⃣  ❌ *Not yet* — keep pantry as is"
             )
 
+    # SAVE RECIPE HANDLER
+    SAVE_TRIGGERS = {"save", "hifadhi", "save recipe", "hifadhi mapishi", "yes save", "save it"}
+    if m in SAVE_TRIGGERS:
+        title = user.get("last_recipe_title", "")
+        recipe_text = user.get("last_recipe_text", "")
+        if title and recipe_text:
+            return save_recipe_for_user(
+                user_id, title, recipe_text,
+                meal_type=user.get("last_recipe_meal_type"),
+                cuisine=user.get("last_recipe_cuisine"),
+                user=user,
+            )
+        return ("No recent recipe to save. Get a recipe first by typing *cook*."
+                if lang == "en" else
+                "Hakuna mapishi ya hivi karibuni. Pata mapishi kwanza kwa kuandika *cook*.")
+
     # RATING HANDLER
     if user.get("awaiting_rating_recipe_id") and (m in ("1","2","3","4","5") or m == "skip"):
         recipe_id = user.get("awaiting_rating_recipe_id")
@@ -1860,12 +2138,7 @@ Return ONLY valid JSON:
 
         if m in ("6", "saved recipes", "saved", "mapishi yangu"):
             saved = get_saved_recipes(user_id)
-            if not saved:
-                return "⭐ No saved recipes yet.\n\nAfter getting a recipe reply:\n_save [recipe name]_"
-            lines = ["⭐ *Your Saved Recipes:*", ""]
-            lines += [f"  {i+1}. {r}" for i, r in enumerate(saved)]
-            lines += ["", "Reply *cook* for a new suggestion!"]
-            return "\n".join(lines)
+            return format_saved_recipes_list(saved, lang)
 
         if m in ("5", "surprise me", "surprise", "chochote"):
             meal_type = None
@@ -1963,12 +2236,7 @@ Return ONLY valid JSON:
             return get_nutrition_summary(user_id, lang, user=user)
         elif m in ("4", "saved recipes", "saved", "mapishi yangu", "favourites"):
             saved = get_saved_recipes(user_id)
-            if not saved:
-                return "⭐ No saved recipes yet.\n\nAfter getting a recipe reply:\n_save [recipe name]_"
-            lines = ["⭐ *Your Saved Recipes:*", ""]
-            lines += [f"  {i+1}. {r}" for i, r in enumerate(saved)]
-            lines += ["", "Reply *cook* for a new suggestion!"]
-            return "\n".join(lines)
+            return format_saved_recipes_list(saved, lang)
         elif m in ("5", "back", "rudi"):
             return main_menu(name, lang)
         else:
@@ -2082,15 +2350,65 @@ Return ONLY valid JSON:
         recipe_name = msg[5:].strip()
         return save_recipe_by_name(user_id, recipe_name, name) if recipe_name else "Tell me which recipe to save:\n_save Pilau_"
 
-    # SAVED RECIPES
-    if m in ("saved", "favourites", "favorites", "my recipes", "saved recipes"):
+    # SAVED RECIPES — list
+    if m in ("saved", "favourites", "favorites", "my recipes", "saved recipes",
+             "mapishi yangu", "mapishi yaliyohifadhiwa"):
         saved = get_saved_recipes(user_id)
-        if not saved:
-            return "⭐ No saved recipes yet.\n\nAfter getting a recipe reply:\n_save [recipe name]_"
-        lines = ["⭐ *Your Saved Recipes:*", ""]
-        lines += [f"  {i+1}. {r}" for i, r in enumerate(saved)]
-        lines += ["", "Reply *cook* for a new suggestion!"]
-        return "\n".join(lines)
+        return format_saved_recipes_list(saved, lang)
+
+    # VIEW A SPECIFIC SAVED RECIPE — "recipe 3" / "mapishi 3"
+    _recipe_num = re.match(r"^(?:recipe|mapishi)\s+(\d+)$", m)
+    if _recipe_num:
+        num = int(_recipe_num.group(1))
+        rec = get_saved_recipe_by_number(user_id, num)
+        if rec:
+            update_user(user_id, {
+                "last_recipe_title": rec["title"],
+                "last_recipe_text": rec.get("recipe_text", ""),
+                "last_recipe_meal_type": rec.get("meal_type"),
+                "last_recipe_cuisine": rec.get("cuisine"),
+            })
+            header = f"📖 *{rec['title']}*\n\n"
+            body = rec.get("recipe_text") or "(No recipe text saved)"
+            return header + body + "\n\n💾 Reply *save* to re-save, or *cook* for new ideas."
+        return (f"❌ Recipe #{num} not found. Type *my recipes* to see your list."
+                if lang == "en" else
+                f"❌ Mapishi #{num} hayapatikani. Andika *mapishi yangu* kuona orodha.")
+
+    # MY PRICES
+    if m in ("my prices", "bei zangu", "prices", "ingredient prices"):
+        return format_my_prices(user_id, lang)
+
+    # SET A PRICE — "price chicken 350" / "price rice 120 kg" / "bei kuku 350"
+    _price_set = re.match(
+        r"^(?:price|bei)\s+([a-z\s]+?)\s+([\d.]+)(?:\s+(\w+))?$", m)
+    if _price_set:
+        ing = _price_set.group(1).strip()
+        try:
+            price = float(_price_set.group(2))
+        except ValueError:
+            price = 0
+        unit = _price_set.group(3) or "unit"
+        if price > 0:
+            return set_user_price(user_id, ing, price, unit)
+
+    # REMOVE A PRICE — "remove price chicken" / "ondoa bei kuku"
+    _price_rm = re.match(r"^(?:remove price|delete price|ondoa bei)\s+(.+)$", m)
+    if _price_rm:
+        return remove_user_price(user_id, _price_rm.group(1).strip())
+
+    # BUDGET COOKING — "cook on budget 500" / "I have Ksh 500" / "budget cook 500"
+    _budget = re.search(
+        r"(?:budget\s*cook|cook\s*on\s*budget|i\s*have\s*ksh|nina\s*ksh|budget)\s*[\s:]?\s*([\d,]+)",
+        m)
+    if _budget:
+        try:
+            budget = float(_budget.group(1).replace(",", ""))
+        except ValueError:
+            budget = 0
+        if budget > 0:
+            pantry = get_household_pantry_names(user)
+            return budget_cook_prompt(budget, pantry, user)
 
     # RECIPE / MEAL TYPE from direct text
     if meal_type is None:
