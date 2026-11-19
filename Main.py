@@ -473,9 +473,90 @@ def find_ingredient_by_name(name: str) -> dict | None:
     return None
 
 
+# ── Expiry defaults (days from purchase) ──────────────────────────────────────
+EXPIRY_MODIFIER_DAYS = {
+    "long life": 90, "uht": 90, "ultra heat": 90,
+    "fresh": 3, "raw": 2, "frozen": 90, "freeze": 90,
+    "dried": 365, "dry": 365, "canned": 365, "tinned": 365,
+    "tin": 365, "can": 365, "smoked": 14,
+    "cooked": 3, "leftover": 2, "ripe": 2, "unripe": 7,
+}
+
+EXPIRY_DEFAULTS_DAYS: dict[str, int] = {
+    "milk": 3, "maziwa": 3, "eggs": 21, "egg": 21, "mayai": 21,
+    "butter": 30, "siagi": 30, "ghee": 90, "cheese": 14,
+    "yoghurt": 7, "yogurt": 7, "cream": 5,
+    "chicken": 2, "kuku": 2, "beef": 2, "nyama": 2,
+    "mince": 2, "minced beef": 2, "pork": 2, "lamb": 2,
+    "fish": 1, "samaki": 1, "tilapia": 1, "prawns": 1,
+    "liver": 2, "ini": 2, "sausage": 5, "sausages": 5, "bacon": 7,
+    "tomatoes": 5, "tomato": 5, "nyanya": 5,
+    "onions": 30, "onion": 30, "vitunguu": 30,
+    "garlic": 30, "ginger": 21, "spinach": 3, "mchicha": 3,
+    "kale": 3, "sukuma wiki": 3, "cabbage": 7, "kabichi": 7,
+    "carrots": 14, "carrot": 14, "karoti": 14,
+    "potatoes": 21, "potato": 21, "viazi": 21,
+    "sweet potatoes": 14, "avocado": 4, "parachichi": 4,
+    "mango": 5, "embe": 5, "banana": 5, "ndizi": 5,
+    "lemon": 14, "ndimu": 14, "lime": 14,
+    "pepper": 7, "pilipili": 7, "courgette": 7, "aubergine": 7,
+    "mushrooms": 5, "mushroom": 5, "pumpkin": 30, "boga": 30,
+    "bread": 4, "mkate": 4, "rice": 180, "mchele": 180,
+    "maize flour": 90, "unga wa mahindi": 90, "flour": 90, "unga": 90,
+    "pasta": 365, "noodles": 365, "oats": 180, "chapati": 2,
+    "beans": 365, "maharagwe": 365, "lentils": 365, "dengu": 365,
+    "chickpeas": 365, "green grams": 365, "ndengu": 365, "peas": 365,
+    "cooking oil": 180, "oil": 180, "mafuta": 180,
+    "salt": 730, "chumvi": 730, "sugar": 730, "sukari": 730,
+    "tomato paste": 180, "coconut milk": 365,
+    "honey": 730, "asali": 730, "stock": 365,
+}
+
+def guess_expiry_days(name: str) -> int | None:
+    lower = name.lower().strip()
+    for mod, days in EXPIRY_MODIFIER_DAYS.items():
+        if mod in lower:
+            return days
+    if lower in EXPIRY_DEFAULTS_DAYS:
+        return EXPIRY_DEFAULTS_DAYS[lower]
+    for key, days in EXPIRY_DEFAULTS_DAYS.items():
+        if key in lower or lower in key:
+            return days
+    return None
+
+def expiry_label(expires_at) -> str:
+    if not expires_at:
+        return ""
+    from datetime import datetime, timezone
+    if isinstance(expires_at, str):
+        try:
+            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except Exception:
+            return ""
+    now = datetime.now(timezone.utc)
+    days = (expires_at.date() - now.date()).days
+    if days < 0:
+        return "⚠️ expired"
+    if days == 0:
+        return "⚠️ expires today"
+    if days == 1:
+        return "⚠️ expires tomorrow"
+    if days <= 3:
+        return f"⚠️ expires in {days} days"
+    return f"expires ~{expires_at.strftime('%d %b')}"
+
+
 def add_ingredients(user_id: str, names: list[str]) -> tuple[list[str], list[str]]:
     added, not_found = [], []
     existing = get_pantry_names(user_id)
+    # Fetch user appliances once for freezer-aware expiry
+    user_row = get_user(user_id) or {}
+    has_freezer = "freezer" in (user_row.get("appliances") or [])
+    # Ingredients that get frozen expiry (90 days) if user has a freezer
+    FREEZER_ITEMS = {
+        "chicken", "beef", "lamb", "pork", "fish", "prawns", "shrimp",
+        "mince", "minced", "meat", "liver", "kidney", "sausage",
+    }
     for name in names:
         name = name.strip().lower()
         if not name:
@@ -487,10 +568,20 @@ def add_ingredients(user_id: str, names: list[str]) -> tuple[list[str], list[str
         if not ing:
             not_found.append(name)
             continue
-        supabase.table("user_pantry_items").insert({
-            "user_id": user_id,
-            "ingredient_id": ing["id"],
-        }).execute()
+        # Auto-set expiry from defaults
+        days = guess_expiry_days(name)
+        # If user has a freezer and this is a raw/freezable protein, extend to 90 days
+        if has_freezer and days is not None and days <= 3:
+            if any(fi in name for fi in FREEZER_ITEMS):
+                days = 90
+        expires_at = None
+        if days:
+            from datetime import datetime, timedelta, timezone
+            expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+        row: dict = {"user_id": user_id, "ingredient_id": ing["id"]}
+        if expires_at:
+            row["expires_at"] = expires_at
+        supabase.table("user_pantry_items").insert(row).execute()
         added.append(ing["name"])
     return added, not_found
 
@@ -546,7 +637,7 @@ def find_matching_recipes(pantry_names: list[str], user: dict, meal_type: str = 
         "id, name, description, instructions, cuisine, meal_type, "
         "prep_time_minutes, cook_time_minutes, servings, difficulty, "
         "calories_per_serving, protein_g, carbs_g, fat_g, is_ai_generated, "
-        "avg_rating, rating_count, "
+        "avg_rating, rating_count, required_appliances, "
         "recipe_ingredients(ingredients(name))"
     )
     if meal_type:
@@ -560,9 +651,15 @@ def find_matching_recipes(pantry_names: list[str], user: dict, meal_type: str = 
     disliked = [d.lower() for d in (user.get("disliked_meals") or [])]
     preferred_cuisines = [c.lower() for c in (user.get("preferred_cuisines") or [])]
     open_to_cuisines = user.get("open_to_cuisines", True)
+    user_appliances = set(user.get("appliances") or [])
 
     matches = []
     for recipe in res.data:
+        # --- Appliance filter: skip recipes that need equipment the user doesn't have ---
+        required_appliances = recipe.get("required_appliances") or []
+        if required_appliances and not set(required_appliances).issubset(user_appliances):
+            continue
+
         required = []
         for ri in recipe.get("recipe_ingredients", []):
             ing = ri.get("ingredients")
@@ -798,11 +895,33 @@ def budget_cook_prompt(budget: float, pantry_names: list[str], user: dict) -> st
     pantry_str = ", ".join(pantry_names) if pantry_names else "nothing specific"
     lang_instruction = "Reply in Swahili." if lang == "sw" else "Reply in English."
 
+    # Build cooking equipment context
+    cooking_method = user.get("cooking_method") or "gas"
+    appliances = user.get("appliances") or []
+    method_labels = {
+        "gas": "a gas cooker", "electric": "an electric cooker/hotplate",
+        "jiko": "a charcoal jiko", "mixed": "a gas cooker and charcoal jiko",
+    }
+    method_desc = method_labels.get(cooking_method, "a gas cooker")
+    if appliances:
+        appliance_labels = {
+            "freezer": "freezer", "oven": "oven", "blender": "blender",
+            "microwave": "microwave", "air_fryer": "air fryer",
+            "pressure_cooker": "pressure cooker", "outdoor_jiko": "outdoor charcoal jiko",
+        }
+        appliance_list = ", ".join(appliance_labels.get(a, a) for a in appliances)
+        equip_context = f"Cooks on {method_desc}, also has: {appliance_list}."
+    else:
+        equip_context = f"Cooks on {method_desc} only, no special appliances."
+
     prompt = f"""You are a helpful Kenyan cooking assistant. The user wants to cook a meal within Ksh {budget:.0f}.
 
 Their pantry: {pantry_str}
 
 {price_context}
+
+Cooking equipment: {equip_context}
+Only suggest techniques their equipment supports (no oven baking without an oven, etc.).
 
 Suggest ONE practical, delicious recipe that fits within Ksh {budget:.0f} for a family of 4, uses Kenyan market ingredients, and prioritises what they already have.
 
@@ -1011,6 +1130,27 @@ def generate_ai_recipe(pantry_names: list[str], user: dict, meal_type: str = Non
     meal_label = meal_type or "any meal"
     pantry_str = ", ".join(pantry_names)
 
+    # Build cooking equipment context
+    cooking_method = user.get("cooking_method") or "gas"
+    appliances = user.get("appliances") or []
+    method_labels = {
+        "gas": "a gas cooker",
+        "electric": "an electric cooker/hotplate",
+        "jiko": "a charcoal jiko",
+        "mixed": "a gas cooker and charcoal jiko",
+    }
+    method_desc = method_labels.get(cooking_method, "a gas cooker")
+    if appliances:
+        appliance_labels = {
+            "freezer": "freezer", "oven": "oven", "blender": "blender",
+            "microwave": "microwave", "air_fryer": "air fryer",
+            "pressure_cooker": "pressure cooker", "outdoor_jiko": "outdoor charcoal jiko",
+        }
+        appliance_list = ", ".join(appliance_labels.get(a, a) for a in appliances)
+        equip_context = f"The user cooks on {method_desc} and also has: {appliance_list}."
+    else:
+        equip_context = f"The user cooks on {method_desc} and has no special appliances."
+
     prompt = f"""You are a professional Kenyan chef and nutritionist.
 
 Create a delicious {meal_label} recipe using ONLY these available ingredients: {pantry_str}
@@ -1021,9 +1161,12 @@ User preferences:
 - Budget: {budget}
 - Language: {"Kiswahili" if lang == "sw" else "English"}
 
+Cooking equipment: {equip_context}
+IMPORTANT: Only suggest cooking methods the user's equipment supports. Do NOT suggest oven-baking if they have no oven, do NOT suggest blending without a blender, etc.
+
 Requirements:
 - Use primarily Kenyan cooking styles and flavours
-- Must be practical and realistic to cook at home
+- Must be practical and realistic to cook at home with the equipment listed above
 - Include accurate nutrition estimates
 - Keep instructions clear and simple
 
@@ -1657,12 +1800,80 @@ def handle_onboarding(user: dict, msg: str) -> tuple[str, bool]:
                     payday = None
             except Exception:
                 pass
+        update_user(user_id, {"payday": payday, "onboarding_step": 16})
+        if sw:
+            return (
+                "🍳 Sawa! Swali moja zaidi — unatumia nini kupikia?\n\n"
+                "1️⃣ Jiko la gesi\n"
+                "2️⃣ Jiko la umeme\n"
+                "3️⃣ Jiko la mkaa (charcoal)\n"
+                "4️⃣ Mseto — zaidi ya moja\n\n"
+                "Jibu *1*, *2*, *3* au *4*.", False
+            )
+        return (
+            "🍳 Almost there! One more question — what do you cook on?\n\n"
+            "1️⃣ Gas burner\n"
+            "2️⃣ Electric stove\n"
+            "3️⃣ Jiko (charcoal)\n"
+            "4️⃣ Mix of these\n\n"
+            "Reply *1*, *2*, *3* or *4*.", False
+        )
+
+    if step == 16:
+        m = msg.strip().lower()
+        method_map = {
+            "1": "gas", "gas": "gas", "gesi": "gas",
+            "2": "electric", "electric": "electric", "umeme": "electric",
+            "3": "jiko", "jiko": "jiko", "charcoal": "jiko", "mkaa": "jiko",
+            "4": "mixed", "mix": "mixed", "mseto": "mixed",
+        }
+        method = method_map.get(m, "gas")
+        update_user(user_id, {"cooking_method": method, "onboarding_step": 17})
+        if sw:
+            return (
+                "👍 Sawa!\n\n"
+                "Je, una vifaa gani hivi? (Jibu kwa nambari, e.g. _1 3_)\n\n"
+                "1️⃣ Friji / Freezer\n"
+                "2️⃣ Oveni\n"
+                "3️⃣ Blender\n"
+                "4️⃣ Microwave\n"
+                "5️⃣ Air fryer\n"
+                "6️⃣ Sufuria ya shinikizo (pressure cooker)\n"
+                "7️⃣ Kupikia kwa mkaa nje (outdoor jiko)\n\n"
+                "_Au andika *hapana* kama huna vitu hivi._", False
+            )
+        return (
+            "👍 Got it!\n\n"
+            "Which of these do you have at home? (Reply with numbers, e.g. _1 3_)\n\n"
+            "1️⃣ Fridge / Freezer\n"
+            "2️⃣ Oven\n"
+            "3️⃣ Blender\n"
+            "4️⃣ Microwave\n"
+            "5️⃣ Air fryer\n"
+            "6️⃣ Pressure cooker\n"
+            "7️⃣ Outdoor jiko / charcoal grill\n\n"
+            "_Or type *none* if you don't have any of these._", False
+        )
+
+    if step == 17:
+        m = msg.strip().lower()
+        appliance_map = {
+            "1": "freezer", "2": "oven", "3": "blender",
+            "4": "microwave", "5": "air_fryer", "6": "pressure_cooker",
+            "7": "outdoor_jiko",
+        }
+        appliances = []
+        if m not in ("none", "hapana"):
+            for part in m.replace(",", " ").split():
+                a = appliance_map.get(part.strip())
+                if a:
+                    appliances.append(a)
         name = user.get("full_name", "Friend")
         style = user.get("cooking_style", "daily")
         update_user(user_id, {
-            "payday": payday,
+            "appliances": appliances,
             "onboarding_complete": True,
-            "onboarding_step": 16,
+            "onboarding_step": 18,
             "awaiting_meal_type": False,
             "awaiting_pantry_action": False,
             "awaiting_profile_action": False,
@@ -1902,6 +2113,38 @@ def route(msg: str, user: dict) -> str:
                 "2️⃣  🥕 *Used some ingredients* — tell me which ones\n"
                 "3️⃣  ❌ *Not yet* — keep pantry as is"
             )
+
+    # NEW APPLIANCE — "I bought an airfryer" / "nimepata oven" / "I have a blender now"
+    _new_appliance = re.search(
+        r"(?:i (?:bought|got|have|purchased|just got)|nimepata|nimenunua|nina sasa)\s+a?n?\s*"
+        r"(air\s*fry(?:er)?|oven|blender|freezer|microwave|pressure\s*cooker|jiko)",
+        m, re.IGNORECASE,
+    )
+    if _new_appliance:
+        raw = _new_appliance.group(1).lower().replace(" ", "_").replace("-", "_")
+        # Normalise to our canonical keys
+        APPLIANCE_CANON = {
+            "air_fryer": "air_fryer", "airfryer": "air_fryer", "air_fry": "air_fryer",
+            "oven": "oven", "blender": "blender", "freezer": "freezer",
+            "microwave": "microwave",
+            "pressure_cooker": "pressure_cooker", "jiko": "outdoor_jiko",
+        }
+        canon = APPLIANCE_CANON.get(raw, raw)
+        current = list(user.get("appliances") or [])
+        if canon not in current:
+            current.append(canon)
+            update_user(user_id, {"appliances": current})
+        appliance_labels = {
+            "air_fryer": "air fryer", "oven": "oven", "blender": "blender",
+            "freezer": "freezer", "microwave": "microwave",
+            "pressure_cooker": "pressure cooker", "outdoor_jiko": "outdoor jiko",
+        }
+        label = appliance_labels.get(canon, canon.replace("_", " "))
+        if lang == "sw":
+            return (f"🎉 Vizuri! Nimeongeza *{label}* kwenye vifaa vyako vya jikoni.\n\n"
+                    f"Mapishi yanayohitaji {label} yataonekana sasa unapoomba mapishi. 🍳")
+        return (f"🎉 Nice! I've added *{label}* to your kitchen equipment.\n\n"
+                f"Recipes that use a {label} will now show up when you ask for suggestions. 🍳")
 
     # SAVE RECIPE HANDLER
     SAVE_TRIGGERS = {"save", "hifadhi", "save recipe", "hifadhi mapishi", "yes save", "save it"}
@@ -2396,6 +2639,15 @@ Return ONLY valid JSON:
     _price_rm = re.match(r"^(?:remove price|delete price|ondoa bei)\s+(.+)$", m)
     if _price_rm:
         return remove_user_price(user_id, _price_rm.group(1).strip())
+
+    # NOTIFICATION / REMINDER SETTINGS
+    if re.search(
+        r"notification|reminder|remind|expiry reminder|meal plan.*remind|shopping.*remind"
+        r"|arifa|ukumbusho|turn off.*expiry|turn off.*reminder|turn on.*reminder"
+        r"|set.*reminder|change.*reminder|my reminders|my notifications",
+        m,
+    ):
+        return handle_notification_settings(user, msg)
 
     # BUDGET COOKING — "cook on budget 500" / "I have Ksh 500" / "budget cook 500"
     _budget = re.search(
@@ -3327,6 +3579,232 @@ def mpesa_callback():
 
 
 # ── Health & debug ─────────────────────────────────────────────────────────────
+
+# ── Notification helpers ───────────────────────────────────────────────────────
+
+def send_whatsapp_notification(to_phone: str, body: str):
+    try:
+        from twilio.rest import Client as TwilioClient
+        client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        client.messages.create(
+            from_=TWILIO_FROM,
+            to=f"whatsapp:{to_phone}" if not to_phone.startswith("whatsapp:") else to_phone,
+            body=body,
+        )
+        log.info(f"📲 Notification sent to {to_phone}")
+    except Exception as e:
+        log.error(f"📲 Notification failed for {to_phone}: {e}")
+
+
+def send_expiry_notifications():
+    try:
+        rows = supabase.rpc("get_expiry_notifications_due").execute()
+        for row in (rows.data or []):
+            phone = row["phone"]
+            lang = row.get("language", "en")
+            items = row.get("item_names", [])
+            days_list = row.get("days_until", [])
+            user_id = row["user_id"]
+            if not items:
+                continue
+            item_lines = []
+            for item, days in zip(items, days_list):
+                if days == 0:
+                    item_lines.append(f"• {item} — ⚠️ expires TODAY")
+                elif days == 1:
+                    item_lines.append(f"• {item} — expires tomorrow")
+                else:
+                    item_lines.append(f"• {item} — expires in {days} days")
+            item_str = "\n".join(item_lines)
+            # Quick recipe tip using expiring items
+            recipe_tip = ""
+            try:
+                u_res = supabase.table("users").select("*").eq("id", user_id).execute()
+                if u_res.data:
+                    u = u_res.data[0]
+                    pantry = get_household_pantry_names(u)
+                    suggestions = find_matching_recipes(pantry, u, max_missing=0)
+                    if suggestions:
+                        r = suggestions[0]
+                        recipe_tip = (
+                            f"\n\n🍳 *Quick idea:* {r['name']}\nReply *cook* for the full recipe!"
+                            if lang == "en" else
+                            f"\n\n🍳 *Wazo:* {r.get('name_sw') or r['name']}\nAndika *cook* kupata mapishi!")
+            except Exception:
+                pass
+            if lang == "sw":
+                body = f"⚠️ *Vitu vinavyoisha muda wake:*\n\n{item_str}{recipe_tip}\n\n_Andika *pantry* kuona vitu vyote._"
+            else:
+                body = f"⚠️ *Expiring soon in your pantry:*\n\n{item_str}{recipe_tip}\n\n_Type *pantry* to see everything._"
+            send_whatsapp_notification(phone, body)
+            supabase.table("user_notification_prefs").update(
+                {"last_sent_at": "now()"}
+            ).eq("user_id", user_id).eq("notif_type", "expiry").execute()
+    except Exception as e:
+        log.error(f"send_expiry_notifications error: {e}")
+
+
+def send_meal_plan_notifications():
+    try:
+        rows = supabase.rpc("get_meal_plan_notifications_due").execute()
+        for row in (rows.data or []):
+            phone, lang, user_id = row["phone"], row.get("language", "en"), row["user_id"]
+            u_res = supabase.table("users").select("*").eq("id", user_id).execute()
+            if not u_res.data:
+                continue
+            user = u_res.data[0]
+            if user.get("tier") != "premium":
+                continue
+            pantry = get_household_pantry_names(user)
+            plan = generate_meal_plan(user, pantry)
+            header = "📅 *Your weekly meal plan!*\n\n" if lang == "en" else "📅 *Mpango wako wa chakula!*\n\n"
+            footer = ("\n\nType *shopping list* to prep!" if lang == "en"
+                      else "\n\nAndika *orodha ya manunuzi* kupanga ununuzi!")
+            send_whatsapp_notification(phone, header + plan + footer)
+            supabase.table("user_notification_prefs").update(
+                {"last_sent_at": "now()"}
+            ).eq("user_id", user_id).eq("notif_type", "meal_plan").execute()
+    except Exception as e:
+        log.error(f"send_meal_plan_notifications error: {e}")
+
+
+def send_shopping_nudges():
+    try:
+        rows = supabase.rpc("get_shopping_nudge_due").execute()
+        for row in (rows.data or []):
+            phone, lang, user_id = row["phone"], row.get("language", "en"), row["user_id"]
+            u_res = supabase.table("users").select("tier").eq("id", user_id).execute()
+            if (u_res.data or [{}])[0].get("tier") != "premium":
+                continue
+            if lang == "sw":
+                body = "🛒 *Ni wakati wa kupanga manunuzi!*\n\nAndika *orodha ya manunuzi* au *pantry*."
+            else:
+                body = "🛒 *Time to plan your shopping!*\n\nType *shopping list* or *pantry* to check what you have."
+            send_whatsapp_notification(phone, body)
+            supabase.table("user_notification_prefs").update(
+                {"last_sent_at": "now()"}
+            ).eq("user_id", user_id).eq("notif_type", "shopping_nudge").execute()
+    except Exception as e:
+        log.error(f"send_shopping_nudges error: {e}")
+
+
+def handle_notification_settings(user: dict, msg: str) -> str:
+    user_id = user["id"]
+    lang = user.get("language", "en")
+    m = msg.strip().lower()
+    tier = user.get("tier", "free")
+    DOW_MAP = {
+        "sunday": 0, "sun": 0, "jumapili": 0,
+        "monday": 1, "mon": 1, "jumatatu": 1,
+        "tuesday": 2, "tue": 2, "jumanne": 2,
+        "wednesday": 3, "wed": 3, "jumatano": 3,
+        "thursday": 4, "thu": 4, "alhamisi": 4,
+        "friday": 5, "fri": 5, "ijumaa": 5,
+        "saturday": 6, "sat": 6, "jumamosi": 6,
+    }
+    DOW_NAMES = {0: "Sunday", 1: "Monday", 2: "Tuesday", 3: "Wednesday",
+                 4: "Thursday", 5: "Friday", 6: "Saturday"}
+
+    def upsert_pref(notif_type: str, **kwargs):
+        supabase.table("user_notification_prefs").upsert(
+            {"user_id": user_id, "notif_type": notif_type, **kwargs},
+            on_conflict="user_id,notif_type"
+        ).execute()
+
+    def parse_hour(text: str) -> int:
+        _h = re.search(r"(\d{1,2})(?::00)?\s*(am|pm)?", text)
+        if not _h:
+            return 8
+        h = int(_h.group(1))
+        if _h.group(2) == "pm" and h < 12:
+            h += 12
+        return h
+
+    # Expiry reminder — free feature
+    _exp = re.search(r"(?:expiry|expire|expiring|remind).*?(\d+)\s*day", m)
+    if _exp or re.search(r"expiry reminder|ukumbusho.*muda", m):
+        days = int(_exp.group(1)) if _exp else 2
+        upsert_pref("expiry", enabled=True, days_before_expiry=days)
+        return (f"✅ I'll remind you *{days} day(s) before* anything expires."
+                if lang == "en" else
+                f"✅ Nitakukumbusha siku *{days}* kabla kitu kuisha muda wake.")
+
+    if re.search(r"turn off expir|stop expir|disable expir|zima ukumbusho", m):
+        upsert_pref("expiry", enabled=False)
+        return ("✅ Expiry reminders turned off." if lang == "en" else "✅ Ukumbusho wa muda umezimwa.")
+
+    # Meal plan — premium
+    if re.search(r"meal plan|weekly plan|mpango wa chakula", m):
+        if tier != "premium":
+            return ("⭐ Scheduled meal plans are *Premium*. Type *upgrade* for Ksh 299/month."
+                    if lang == "en" else "⭐ Mpango wa chakula ni wa *Premium*. Andika *upgrade*.")
+        dow = next((d for w, d in DOW_MAP.items() if w in m), 0)
+        hour = parse_hour(m)
+        upsert_pref("meal_plan", enabled=True, day_of_week=dow, hour_of_day=hour)
+        return (f"✅ Weekly meal plan set for *{DOW_NAMES[dow]} at {hour}:00*."
+                if lang == "en" else f"✅ Mpango umewekwa kila *{DOW_NAMES[dow]} saa {hour}*.")
+
+    if re.search(r"turn off meal|stop meal|zima mpango", m):
+        upsert_pref("meal_plan", enabled=False)
+        return ("✅ Weekly meal plan notifications off." if lang == "en" else "✅ Arifa ya mpango imezimwa.")
+
+    # Shopping nudge — premium
+    if re.search(r"shopping remind|shopping nudge|shopping notify|ukumbusho.*ununuzi", m):
+        if tier != "premium":
+            return ("⭐ Shopping reminders are *Premium*. Type *upgrade*."
+                    if lang == "en" else "⭐ Ukumbusho wa ununuzi ni wa *Premium*. Andika *upgrade*.")
+        dow = next((d for w, d in DOW_MAP.items() if w in m), 5)
+        hour = parse_hour(m)
+        upsert_pref("shopping_nudge", enabled=True, day_of_week=dow, hour_of_day=hour)
+        return (f"✅ Shopping reminder set for *{DOW_NAMES[dow]} at {hour}:00*."
+                if lang == "en" else f"✅ Ukumbusho wa ununuzi: kila *{DOW_NAMES[dow]} saa {hour}*.")
+
+    if re.search(r"turn off shopping|stop shopping|zima ununuzi", m):
+        upsert_pref("shopping_nudge", enabled=False)
+        return ("✅ Shopping reminders off." if lang == "en" else "✅ Ukumbusho wa ununuzi umezimwa.")
+
+    # Show current settings
+    try:
+        prefs = supabase.table("user_notification_prefs").select("*").eq("user_id", user_id).execute()
+        pref_map = {p["notif_type"]: p for p in (prefs.data or [])}
+    except Exception:
+        pref_map = {}
+
+    exp = pref_map.get("expiry", {})
+    exp_st = f"✅ {exp.get('days_before_expiry', 2)} days before" if exp.get("enabled") else "❌ Off"
+    lines = ["🔔 *Your Notifications*\n",
+             f"*Expiry reminders:* {exp_st}",
+             "  → _expiry reminder 2 days_\n"]
+    if tier == "premium":
+        mp = pref_map.get("meal_plan", {})
+        mp_st = (f"✅ {DOW_NAMES.get(mp.get('day_of_week', 0))} {mp.get('hour_of_day', 8)}:00"
+                 if mp.get("enabled") else "❌ Off")
+        sh = pref_map.get("shopping_nudge", {})
+        sh_st = (f"✅ {DOW_NAMES.get(sh.get('day_of_week', 5))} {sh.get('hour_of_day', 18)}:00"
+                 if sh.get("enabled") else "❌ Off")
+        lines += [f"*Weekly meal plan:* {mp_st}",
+                  "  → _meal plan Sunday 8am_\n",
+                  f"*Shopping reminder:* {sh_st}",
+                  "  → _shopping reminder Friday 6pm_"]
+    else:
+        lines += ["*Weekly meal plan:* ⭐ Premium only",
+                  "*Shopping reminder:* ⭐ Premium only",
+                  "\n_Type *upgrade* for Ksh 299/month_"]
+    return "\n".join(lines)
+
+
+# ── /notify endpoint (called hourly by Railway cron) ──────────────────────────
+@app.route("/notify", methods=["POST"])
+def notify():
+    secret = request.headers.get("X-Notify-Secret", "")
+    expected = os.environ.get("NOTIFY_SECRET", "")
+    if expected and secret != expected:
+        return {"error": "unauthorized"}, 401
+    send_expiry_notifications()
+    send_meal_plan_notifications()
+    send_shopping_nudges()
+    return {"status": "ok"}
+
 
 @app.route("/health")
 def health():
