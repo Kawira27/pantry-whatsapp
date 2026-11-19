@@ -960,10 +960,20 @@ _[Brief description]_
             "last_recipe_meal_type": None,
             "last_recipe_cuisine": "Kenyan",
         })
+        # Inject deep fry tip if applicable
+        fry_tip = ""
+        if re.search(r"deep.?fry|fry in.{0,15}oil|heat oil.{0,30}fry|fry until.{0,30}golden", recipe_text.lower()):
+            fry_tip = (
+                "\n\n💡 *No thermometer? Test your oil:* Dip the handle of a wooden spoon in — "
+                "steady bubbles around it means it's ready. 🥢"
+                if lang == "en" else
+                "\n\n💡 *Jua mafuta yako yako tayari:* Tia upande wa kijiti cha mti ndani — "
+                "mapovu yanazunguka inamaanisha mafuta yako tayari. 🥢"
+            )
         save_prompt = ("\n\n💾 Reply *save* to keep this recipe, or *cook* for more ideas."
                        if lang == "en" else
                        "\n\n💾 Andika *hifadhi* kuweka mapishi haya, au *cook* kwa zaidi.")
-        return recipe_text + save_prompt
+        return recipe_text + fry_tip + save_prompt
     except Exception as e:
         log.error(f"budget_cook_prompt failed: {e}")
         return ("❌ Could not generate a budget recipe right now. Try again shortly."
@@ -1037,6 +1047,23 @@ def format_recipe(recipe: dict, show_nutrition: bool = True, lang: str = "en") -
             s = re.sub(r'^\d+[\.\:]\s*', '', s)
             if s:
                 lines.append(f"  {n}. {s}")
+        lines.append("")
+
+    # Practical cooking tips based on method
+    instructions_lower = (recipe.get("instructions") or "").lower()
+    if re.search(r"deep.?fry|deep fry|fry in.{0,15}oil|fry until.{0,30}golden|heat oil.{0,30}fry", instructions_lower):
+        if lang == "sw":
+            lines.append(
+                "💡 *Jinsi ya kujua mafuta yako yako tayari (bila thermometer):*\n"
+                "  Chukua upande wa kijiti cha mti na tia ndani ya mafuta — kama mapovu "
+                "yanaanza kuzunguka kijiti, mafuta yako tayari kupika. 🥢"
+            )
+        else:
+            lines.append(
+                "💡 *No thermometer? Here's how to test your oil is ready:*\n"
+                "  Dip the handle end of a wooden spoon into the oil — if bubbles form "
+                "steadily around it, the oil is hot enough to fry. 🥢"
+            )
         lines.append("")
 
     if show_nutrition and recipe.get("calories_per_serving"):
